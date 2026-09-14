@@ -245,6 +245,21 @@ class Scheduler:
 
         self._done_daily.add(date_key)
         results: list[str] = []
+        #: 先写日终快照（自选池 / 模拟持仓）—— 日历与历史回测都依赖它。
+        #: 放在扫描之前：即使后面的扫描失败，当天的持仓/自选状态也已经留档。
+        try:
+            from . import snapshot_service
+
+            snap = await snapshot_service.snapshot_all()
+            results.append(
+                "快照 自选%d/持仓%d" % (
+                    (snap.get("watchlist") or {}).get("written", 0),
+                    (snap.get("positions") or {}).get("written", 0),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("日终快照失败: %s", exc)
+            results.append(f"快照失败: {exc}")
         try:
             from ..engines import STRATEGY_ORDER, scan_many
 

@@ -21,38 +21,141 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # 自选
 # --------------------------------------------------------------------------- #
-def list_watchlist() -> list[dict[str, Any]]:
-    rows = db.query("SELECT * FROM watchlist ORDER BY sort_order, added_at DESC")
-    return [
-        {
-            "code": row["code"], "name": row["name"], "note": row["note"],
-            "tags": [t for t in str(row["tags"] or "").split(",") if t],
-            "added_at": row["added_at"],
-            "added_at_text": time.strftime("%Y-%m-%d %H:%M", time.localtime(row["added_at"])),
-            "sort_order": row["sort_order"],
-        }
-        for row in rows
-    ]
+#: 自选状态
+WATCH_ACTIVE = "active"
+WATCH_REMOVED = "removed"
 
 
-def add_watchlist(code: str, name: str = "", note: str = "", tags: Sequence[str] = ()) -> dict[str, Any]:
+def _watch_row(row: Any) -> dict[str, Any]:
+    status = str(row["status"] or WATCH_ACTIVE)
+    removed_at = row["removed_at"] if "removed_at" in row.keys() else None
+    return {
+        "code": row["code"], "name": row["name"], "note": row["note"],
+        "tags": [t for t in str(row["tags"] or "").split(",") if t],
+        "added_at": row["added_at"],
+        "added_at_text": _ts_text(row["added_at"]),
+        "removed_at": removed_at,
+        "removed_at_text": _ts_text(removed_at) if removed_at else "",
+        "status": status,
+        "sort_order": row["sort_order"],
+    }
+
+
+def _ts_text(ts: Any) -> str:
+    if not ts:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+
+
+def list_watchlist(*, include_removed: bool = False) -> list[dict[str, Any]]:
+    """当前自选池。
+
+    ``include_removed=True`` 时把历史（已移出）的也一并返回 —— 供「历史自选股池」
+    使用；默认只返回在池中的，保持既有调用方行为不变。
+    """
+    if include_removed:
+        rows = db.query("SELECT * FROM watchlist ORDER BY status, sort_order, added_at DESC")
+    else:
+        rows = db.query(
+            "SELECT * FROM watchlist WHERE status<>? ORDER BY sort_order, added_at DESC",
+            (WATCH_REMOVED,),
+        )
+    return [_watch_row(row) for row in rows]
+
+
+def watchlist_history(*, limit: int = 500) -> dict[str, Any]:
+    """历史自选股池：已移出的股票 + 完整的放入/放出事件流水。
+
+    两者都要给：
+      * ``items``   —— 已移出的标的（含放入与放出两个时间戳、期间涨跌幅）
+      * ``events``  —— 事件流水（反复加入/移出时只有它能还原真实过程）
+    """
+    rows = db.query(
+        "SELECT * FROM watchlist WHERE status=? ORDER BY removed_at DESC LIMIT ?",
+        (WATCH_REMOVED, int(limit)),
+    )
+    items = [_watch_row(row) for row in rows]
+
+    events = db.query(
+        "SELECT * FROM watch_event ORDER BY event_at DESC LIMIT ?", (int(limit),)
+    )
+    return {
+        "items": items,
+        "events": [
+            {
+                "id": e["id"], "code": e["code"], "name": e["name"],
+                "action": e["action"], "price": e["price"], "note": e["note"],
+                "event_at": e["event_at"], "event_at_text": _ts_text(e["event_at"]),
+                "trade_date": e["trade_date"],
+            }
+            for e in events
+        ],
+    }
+
+
+def _log_watch_event(code: str, name: str, action: str, *, price: float = 0.0,
+                     note: str = "") -> None:
+    """记一条自选进出事件（放入/放出）。"""
+    try:
+        db.execute(
+            "INSERT INTO watch_event(code, name, action, price, note, event_at, trade_date) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (code, name, action, float(price or 0), note, time.time(), today_str()),
+        )
+    except Exception as exc:  # noqa: BLE001 - 事件流水失败不应影响主流程
+        logger.warning("自选事件写入失败 %s %s: %s", code, action, exc)
+
+
+def add_watchlist(code: str, name: str = "", note: str = "", tags: Sequence[str] = (),
+                  *, price: float = 0.0) -> dict[str, Any]:
+    """加入自选。
+
+    重新加入一只**曾经移出**的股票时：删掉那条历史行并插入新行 —— 这样
+    ``added_at`` 反映的是本次放入时间，而历史过程留在 ``watch_event`` 里。
+    """
     code = normalize_code(code)
     now = time.time()
+    existing = db.query_one("SELECT * FROM watchlist WHERE code=?", (code,))
+    if existing is not None and str(existing["status"] or WATCH_ACTIVE) == WATCH_REMOVED:
+        db.execute("DELETE FROM watchlist WHERE code=?", (code,))
+        existing = None
+
     db.execute(
-        "INSERT INTO watchlist(code, name, note, tags, added_at, sort_order) VALUES(?,?,?,?,?,?) "
-        "ON CONFLICT(code) DO UPDATE SET name=excluded.name, note=excluded.note, tags=excluded.tags",
-        (code, name, note, ",".join(tags), now, 0),
+        "INSERT INTO watchlist(code, name, note, tags, added_at, status, sort_order) "
+        "VALUES(?,?,?,?,?,?,?) "
+        "ON CONFLICT(code) DO UPDATE SET name=excluded.name, note=excluded.note, "
+        "tags=excluded.tags, status='active', removed_at=NULL",
+        (code, name, note, ",".join(tags), now, WATCH_ACTIVE, 0),
     )
-    return {"code": code, "name": name, "note": note, "tags": list(tags), "added_at": now}
+    if existing is None:
+        _log_watch_event(code, name, "add", price=price, note=note)
+    return {"code": code, "name": name, "note": note, "tags": list(tags),
+            "added_at": now, "status": WATCH_ACTIVE}
 
 
-def remove_watchlist(codes: Sequence[str]) -> int:
+def remove_watchlist(codes: Sequence[str], *, price: float = 0.0) -> int:
+    """移出自选 —— **软删除**，保留记录与两个时间戳，供历史自选股池使用。
+
+    硬删除会让"这只票什么时候进的、什么时候出的、期间涨跌多少"永久丢失，
+    日历与历史回测都没有依据。
+    """
     if not codes:
         return 0
     targets = [normalize_code(c) for c in codes]
-    placeholders = ",".join("?" for _ in targets)
-    cur = db.execute(f"DELETE FROM watchlist WHERE code IN ({placeholders})", tuple(targets))
-    return cur.rowcount or 0
+    now = time.time()
+    removed = 0
+    for code in targets:
+        row = db.query_one("SELECT * FROM watchlist WHERE code=?", (code,))
+        if row is None or str(row["status"] or WATCH_ACTIVE) == WATCH_REMOVED:
+            continue
+        cur = db.execute(
+            "UPDATE watchlist SET status=?, removed_at=? WHERE code=? AND status<>?",
+            (WATCH_REMOVED, now, code, WATCH_REMOVED),
+        )
+        if cur.rowcount:
+            removed += 1
+            _log_watch_event(code, str(row["name"] or ""), "remove", price=price)
+    return removed
 
 
 def update_watchlist_note(code: str, note: str) -> bool:

@@ -28,7 +28,7 @@ from ..paths import DB_PATH, ensure_dirs
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -105,14 +105,74 @@ CREATE TABLE IF NOT EXISTS source_health (
 CREATE INDEX IF NOT EXISTS idx_health_alias ON source_health(alias, created_at);
 
 -- 自选
+--   status: active=在池中 / removed=已移出（软删除，保留历史）
+--   removed_at: 移出时间；重新加入会新建一行，因此历史是完整的事件流
 CREATE TABLE IF NOT EXISTS watchlist (
     code       TEXT PRIMARY KEY,
     name       TEXT NOT NULL DEFAULT '',
     note       TEXT NOT NULL DEFAULT '',
     tags       TEXT NOT NULL DEFAULT '',
     added_at   REAL NOT NULL,
+    removed_at REAL,
+    status     TEXT NOT NULL DEFAULT 'active',
     sort_order INTEGER NOT NULL DEFAULT 0
 );
+
+-- 自选进出事件流水（放入/放出各一条，含时间戳与交易日期）
+--   与 watchlist 的区别：watchlist 是"当前状态"，本表是"完整历史"。
+--   用户反复加入/移出同一只股票时，只有本表能还原真实过程。
+CREATE TABLE IF NOT EXISTS watch_event (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL,
+    name       TEXT NOT NULL DEFAULT '',
+    action     TEXT NOT NULL,              -- add / remove
+    price      REAL NOT NULL DEFAULT 0,    -- 事件发生时的价格（可空为 0）
+    note       TEXT NOT NULL DEFAULT '',
+    event_at   REAL NOT NULL,              -- 事件时间戳
+    trade_date TEXT NOT NULL DEFAULT ''    -- 事件所属交易日（便于按日检索）
+);
+CREATE INDEX IF NOT EXISTS idx_watch_event_code ON watch_event(code, event_at);
+CREATE INDEX IF NOT EXISTS idx_watch_event_date ON watch_event(trade_date);
+
+-- 自选池每日快照（收盘后写一次）
+--   日历功能按 trade_date 取"那一天的自选池长什么样"。
+CREATE TABLE IF NOT EXISTS watchlist_daily (
+    trade_date  TEXT NOT NULL,
+    code        TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    price       REAL NOT NULL DEFAULT 0,
+    prev_close  REAL NOT NULL DEFAULT 0,
+    change_pct  REAL NOT NULL DEFAULT 0,   -- 当日涨跌幅
+    amount      REAL NOT NULL DEFAULT 0,
+    source      TEXT NOT NULL DEFAULT '',
+    captured_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (trade_date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_daily_date ON watchlist_daily(trade_date);
+
+-- 模拟持仓每日快照（收盘后写一次）
+--   记录当日收盘价与**自买入起的累计涨跌幅**，用于：
+--     * 日历按日查看持仓盈亏
+--     * 历史胜率/盈亏比的回测与归因
+CREATE TABLE IF NOT EXISTS position_daily (
+    trade_date  TEXT NOT NULL,
+    position_id INTEGER NOT NULL,
+    code        TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    entry_price REAL NOT NULL DEFAULT 0,   -- 建仓价（冗余存一份，便于单表回放）
+    close       REAL NOT NULL DEFAULT 0,   -- 当日收盘价
+    gain_pct    REAL NOT NULL DEFAULT 0,   -- 自建仓价起的累计涨跌幅 %
+    gain_amount REAL NOT NULL DEFAULT 0,   -- 浮动盈亏（元）
+    shares      REAL NOT NULL DEFAULT 0,
+    market_value REAL NOT NULL DEFAULT 0,
+    hold_days   INTEGER NOT NULL DEFAULT 0,
+    status      TEXT NOT NULL DEFAULT 'open',
+    source      TEXT NOT NULL DEFAULT '',
+    captured_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (trade_date, position_id)
+);
+CREATE INDEX IF NOT EXISTS idx_position_daily_date ON position_daily(trade_date);
+CREATE INDEX IF NOT EXISTS idx_position_daily_code ON position_daily(code, trade_date);
 
 -- 模拟持仓台账
 CREATE TABLE IF NOT EXISTS portfolio (
@@ -243,6 +303,7 @@ class Database:
                 return
             conn = self.connection
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -253,6 +314,45 @@ class Database:
             )
             self._initialized = True
             logger.info("数据库就绪: %s", self.path.name)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """把已存在的旧库补齐到当前 schema。
+
+        ``CREATE TABLE IF NOT EXISTS`` 对**已存在的表**不会新增列，因此给
+        watchlist 增加 ``removed_at`` / ``status``（自选改软删除）必须显式
+        ALTER。SQLite 不支持 ``ADD COLUMN IF NOT EXISTS``，只能先查
+        ``PRAGMA table_info`` 再决定是否执行。
+        """
+        def columns(table: str) -> set[str]:
+            try:
+                return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
+            except sqlite3.Error:
+                return set()
+
+        wanted = {
+            "watchlist": [
+                ("removed_at", "REAL"),
+                ("status", "TEXT NOT NULL DEFAULT 'active'"),
+            ],
+        }
+        for table, specs in wanted.items():
+            existing = columns(table)
+            if not existing:
+                continue        # 表还不存在（本会话已由 _SCHEMA 建好则不会走到这里）
+            for column, ddl in specs:
+                if column in existing:
+                    continue
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                    logger.info("数据库迁移: %s 新增列 %s", table, column)
+                except sqlite3.Error as exc:  # noqa: BLE001 - 迁移失败不应阻断启动
+                    logger.warning("数据库迁移失败 %s.%s: %s", table, column, exc)
+        #: 旧库里已存在的自选一律视为"在池中"
+        try:
+            conn.execute("UPDATE watchlist SET status='active' WHERE status IS NULL OR status=''")
+        except sqlite3.Error:
+            pass
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

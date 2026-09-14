@@ -1067,6 +1067,112 @@ class TestUserAPI:
         assert pos(r"table\.grid th,\s*table\.grid td\s*\{\s*padding:\s*6px 5px") > base_pad, \
             "窄屏 padding 覆盖必须晚于 table.grid 基础规则，否则不生效"
 
+    async def test_watchlist_remove_is_soft_delete(self, client, warm_market):
+        """移出自选必须是"软删除"并留下完整历史（第2、3条）。
+
+        原先 remove_watchlist 是**硬删除**：一旦移出，"这只票什么时候进的、
+        什么时候出的、期间涨跌多少"永久丢失 —— 历史自选股池与日历都没有依据。
+
+        这里锁定四件事：
+          1. 移出后不在当前池中，但出现在历史池里；
+          2. 放入/放出两个时间戳都在；
+          3. 事件流水记录 add / remove；
+          4. 重新加入后历史归零、added_at 是**本次**时间，而事件流水仍保留全过程。
+        """
+        code = warm_market[6].code
+        unwrap(await client.post("/api/watchlist", json={"code": code, "name": "历史测试"}))
+        try:
+            active = unwrap(await client.get("/api/watchlist"))
+            assert any(i["code"] == code for i in active["items"])
+            assert active["items"][0]["added_at_text"], "在池中的自选应有加入时间"
+
+            unwrap(await client.request("DELETE", "/api/watchlist", json={"codes": [code]}))
+            active = unwrap(await client.get("/api/watchlist"))
+            assert not any(i["code"] == code for i in active["items"]), "移出后不应还在当前池"
+
+            history = unwrap(await client.get("/api/watchlist/history"))
+            row = next((i for i in history["items"] if i["code"] == code), None)
+            assert row is not None, "移出后应出现在历史自选池"
+            assert row["status"] == "removed"
+            assert row["added_at"] and row["removed_at"], "放入与放出时间戳都要有"
+            assert row["added_at_text"] and row["removed_at_text"], "时间戳要有人类可读格式"
+            assert row["removed_at"] >= row["added_at"]
+
+            actions = [e["action"] for e in history["events"] if e["code"] == code]
+            assert "remove" in actions, f"事件流水缺少 remove: {actions}"
+            assert all(e["trade_date"] for e in history["events"]), "事件应带交易日"
+
+            #: 重新加入 → 历史清空该票，事件流水仍保留全过程
+            unwrap(await client.post("/api/watchlist", json={"code": code, "name": "历史测试"}))
+            again = unwrap(await client.get("/api/watchlist"))
+            back = next(i for i in again["items"] if i["code"] == code)
+            assert back["status"] == "active"
+            history2 = unwrap(await client.get("/api/watchlist/history"))
+            assert not any(i["code"] == code for i in history2["items"]), "重新加入后不应仍在历史池"
+            actions2 = [e["action"] for e in history2["events"] if e["code"] == code]
+            assert "add" in actions2 and "remove" in actions2, \
+                f"事件流水应保留 add 与 remove: {actions2}"
+        finally:
+            await client.request("DELETE", "/api/watchlist", json={"codes": [code]})
+
+    async def test_snapshot_capture_and_calendar(self, client, warm_market):
+        """日终快照必须能落库，并支撑"按日期查看"（第1、5条）。
+
+        用户明确要求**只在收盘后写一次**，不做盘中每分钟落库。
+        快照要回答两个问题：
+          * 那一天的自选池长什么样（价格/涨跌幅）
+          * 那一天每笔持仓自买入起涨跌多少（gain_pct）
+        """
+        from stock_space.services import snapshot_service
+
+        code = warm_market[8].code
+        unwrap(await client.post("/api/watchlist", json={"code": code, "name": "快照测试"}))
+        opened = unwrap(await client.post("/api/portfolio/open", json={
+            "code": code, "name": "快照测试", "price": 10.0, "shares": 100, "reason": "快照用例",
+        }))
+        try:
+            result = await snapshot_service.snapshot_all()
+            assert result["trade_date"], "快照应带交易日期"
+            assert result["watchlist"]["written"] >= 1, "自选快照未写入"
+            assert result["positions"]["written"] >= 1, "持仓快照未写入"
+
+            dates = unwrap(await client.get("/api/snapshots/dates"))
+            day = next((d for d in dates["items"] if d["trade_date"] == result["trade_date"]), None)
+            assert day is not None, "日历可选日期里应包含刚写入的日期"
+            assert day["positions"] >= 1
+
+            payload = unwrap(await client.get("/api/snapshots/day",
+                                              params={"date": result["trade_date"]}))
+            assert payload["trade_date"] == result["trade_date"]
+            assert payload["available"], "应回传可选日期列表供日历禁用无数据日期"
+
+            pos = next((p for p in payload["positions"] if p["position_id"] == opened["id"]), None)
+            assert pos is not None, "按日快照里应能找到该持仓"
+            assert pos["entry_price"] == 10.0
+            assert pos["close"] > 0
+            #: gain_pct 必须等于 (收盘 - 成本) / 成本
+            expect = (pos["close"] - 10.0) / 10.0 * 100.0
+            assert abs(pos["gain_pct"] - expect) < 0.01, \
+                f"自买入起的涨跌幅算错: {pos['gain_pct']} vs {expect}"
+
+            watch = next((w for w in payload["watchlist"] if w["code"] == code), None)
+            assert watch is not None, "按日快照里应能找到该自选"
+            assert watch["price"] > 0
+
+            #: 幂等：同一天重复写不应产生重复行
+            again = await snapshot_service.snapshot_all(result["trade_date"])
+            assert again["positions"]["written"] == result["positions"]["written"]
+            from stock_space.store.db import db
+
+            n = db.query_one(
+                "SELECT COUNT(*) c FROM position_daily WHERE trade_date=? AND position_id=?",
+                (result["trade_date"], opened["id"]),
+            )
+            assert int(n["c"]) == 1, "同日重复快照不应产生重复行"
+        finally:
+            await client.request("DELETE", "/api/portfolio/%d" % opened["id"])
+            await client.request("DELETE", "/api/watchlist", json={"codes": [code]})
+
     async def test_portfolio_lifecycle(self, client, warm_market):
         code = warm_market[3].code
         opened = unwrap(await client.post("/api/portfolio/open", json={

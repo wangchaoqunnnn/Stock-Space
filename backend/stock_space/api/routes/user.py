@@ -58,8 +58,57 @@ async def add_watchlist_batch(payload: dict = Body(...)) -> dict[str, Any]:
 
 @router.delete("/watchlist")
 async def remove_watchlist(codes: list[str] = Body(..., embed=True)) -> dict[str, Any]:
+    #: 软删除 —— 保留记录与时间戳，供「历史自选股池」使用
     removed = user_service.remove_watchlist(codes)
-    return ok({"removed": removed}, f"已移除 {removed} 只")
+    return ok({"removed": removed, "moved_to_history": True}, f"已移入历史自选 {removed} 只")
+
+
+@router.get("/watchlist/history")
+async def watchlist_history(limit: int = Query(500, ge=1, le=2000)) -> dict[str, Any]:
+    """历史自选股池：已移出的标的 + 完整的放入/放出事件流水。"""
+    data = user_service.watchlist_history(limit=limit)
+    return ok({
+        "items": data["items"],
+        "events": data["events"],
+        "count": len(data["items"]),
+        "event_count": len(data["events"]),
+    })
+
+
+# --------------------------------------------------------------------------- #
+# 日终快照 / 日历
+# --------------------------------------------------------------------------- #
+@router.get("/snapshots/dates")
+async def snapshot_dates(limit: int = Query(90, ge=1, le=365)) -> dict[str, Any]:
+    """哪些日期有快照 —— 前端日历据此禁用无数据的日期。"""
+    from ...services import snapshot_service
+
+    return ok({"items": snapshot_service.available_dates(limit=limit)})
+
+
+@router.get("/snapshots/day")
+async def snapshot_day(date: str = Query("", description="YYYY-MM-DD，留空取最新有数据的日期")) -> dict[str, Any]:
+    """某一天的自选池 + 模拟持仓快照（行情中枢/情绪周期/我的持仓的日历用它）。"""
+    from ...services import snapshot_service
+
+    day = date.strip()
+    if not day:
+        dates = snapshot_service.available_dates(limit=1)
+        day = dates[0]["trade_date"] if dates else ""
+    if not day:
+        return ok({"trade_date": "", "watchlist": [], "positions": [], "available": []})
+    payload = snapshot_service.day_snapshot(day)
+    payload["available"] = snapshot_service.available_dates(limit=90)
+    return ok(payload)
+
+
+@router.post("/snapshots/capture")
+async def snapshot_capture(date: str = Query("", description="补跑指定日期，留空=今天")) -> dict[str, Any]:
+    """手工补写一次日终快照（收盘后自动写入，这里是补跑入口）。"""
+    from ...services import snapshot_service
+
+    result = await snapshot_service.snapshot_all(date.strip())
+    return ok(result, "快照已写入")
 
 
 @router.put("/watchlist/{code}/note")
@@ -140,14 +189,16 @@ async def export_signals(strategy: str = "", limit: int = Query(500, ge=1, le=50
 
 
 @router.get("/export/watchlist.csv")
-async def export_watchlist() -> Response:
-    rows = user_service.list_watchlist()
+async def export_watchlist(include_removed: bool = Query(False)) -> Response:
+    """导出自选。``include_removed=true`` 时连历史（已移出）一并导出。"""
+    rows = user_service.list_watchlist(include_removed=include_removed)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["代码", "名称", "标签", "备注", "加入时间"])
+    writer.writerow(["代码", "名称", "标签", "备注", "状态", "加入时间", "移出时间"])
     for row in rows:
         writer.writerow([row["code"], row["name"], "/".join(row["tags"]), row["note"],
-                         row["added_at_text"]])
+                         "在池中" if row.get("status") != "removed" else "已移出",
+                         row["added_at_text"], row.get("removed_at_text", "")])
     body = "\ufeff" + buffer.getvalue()
     return Response(
         content=body.encode("utf-8"),
