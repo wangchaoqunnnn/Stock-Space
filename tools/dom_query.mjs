@@ -79,9 +79,21 @@ await send('Runtime.enable');
 await send('Page.enable');
 //: --window-size 在 headless=new 下不改变 CSS 视口宽度，必须用设备指标覆盖才能
 //: 真正触发移动端媒体查询（否则 innerWidth 恒为 550，测不出断点布局）。
+//:
+//: ⚠️ mobile 必须为 true 才算"设备模拟"：`mobile:false` 只是裁剪可视区域，
+//: **媒体查询仍按桌面宽度求值** —— 于是 @media (max-width:720px) 不生效，
+//: 会得出"移动端断点没起作用"的错误结论（实测踩过）。
+//: SS_WIN 给的宽度 ≤ 860 时自动按移动设备模拟。
+const VW = Number(WINDOW_SIZE.split(',')[0]);
+const VH = Number(WINDOW_SIZE.split(',')[1]);
+const IS_MOBILE = process.env.SS_MOBILE
+  ? process.env.SS_MOBILE === '1'
+  : VW <= 860;
 await send('Emulation.setDeviceMetricsOverride', {
-  width: Number(WINDOW_SIZE.split(',')[0]), height: Number(WINDOW_SIZE.split(',')[1]),
-  deviceScaleFactor: 1, mobile: false,
+  width: VW, height: VH,
+  deviceScaleFactor: IS_MOBILE ? 2 : 1,
+  mobile: IS_MOBILE,
+  screenWidth: VW, screenHeight: VH,
 });
 await send('Page.navigate', { url: URL_TO_OPEN });
 await sleep(WAIT);

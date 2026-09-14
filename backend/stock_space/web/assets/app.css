@@ -578,6 +578,12 @@ table.grid tbody tr.expanded { background: var(--panel-2); }
   /*: 涨停梯队通栏表有 10 列（实测最少需 440px），手机容器只有 312px。
      与其让它横向滚动，不如收起 4 个次要列 —— 保留代码/分层/名称/连板/涨跌幅/成交额。 */
   .hide-narrow { display: none; }
+  /*: 再收起一个次要列（自选池的"板块"）：表头是 nowrap 且有内边距，
+     列宽压不到文字以下（"涨跌幅"≈62px），8 列需 348px 而容器只有 306px。 */
+  .hide-sm { display: none; }
+  /*: ⚠️ 单元格内边距的覆盖要写在 **文件末尾的 860px 块**里，不能写在这里：
+     基础规则 `table.grid th, td { padding: 7px 9px }` 在文件前部，
+     而 860px 块在其后 —— 同特异性下后出现者胜，写在这里会被它盖掉。 */
 }
 @media (max-width: 1000px) {
   .brand-text em { display: none; }
@@ -594,14 +600,19 @@ table.grid tbody tr.expanded { background: var(--panel-2); }
   .sidenav.open { transform: translateX(0); }
   .content { padding: 12px 12px calc(var(--bottom-h) + 24px); }
   .topbar-search { max-width: none; }
-  .bottom-nav { display: flex; }
   .toast { bottom: calc(var(--bottom-h) + 12px); }
   /* 移动端只收窄名称列；数值列交给共享网格按内容宽度自适应，
      否则 "5 家 · 最高 3 板" 在 60px 的固定宽度里又会折成两行。 */
   .bar-list { grid-template-columns: minmax(0, 92px) minmax(48px, 1fr) max-content; column-gap: 6px; }
   h1 { font-size: 18px; }
   .kpi-card .k-value { font-size: 18px; }
+  /*: ⚠️ 这条必须留在**基础规则之后的这个块**里（基础规则在文件前部）。
+     同特异性下由源码顺序决定胜负 —— 若把它挪到前面的 720px 块，
+     会被这里的 6px 7px 覆盖，手机窄屏表格就会多出 4px 溢出并出现横向滚动。 */
   table.grid th, table.grid td { padding: 6px 7px; }
+}
+@media (max-width: 720px) {
+  table.grid th, table.grid td { padding: 6px 5px; }
 }
 
 /* 底部导航默认隐藏(桌面端) */
@@ -620,6 +631,15 @@ table.grid tbody tr.expanded { background: var(--panel-2); }
 .bottom-nav a:hover { text-decoration: none; }
 .bottom-nav a.active { color: var(--accent); }
 .bottom-nav .bn-ico { font-size: 15px; line-height: 1; }
+
+/*: ⚠️ 这条必须排在基础规则 `.bottom-nav { display: none }` **之后**。
+   两者特异性相同（都是 0,1,0），只由**源码顺序**决胜负 ——
+   此前它被放在基础规则之前，导致 `display:none` 永远胜出，
+   移动端底部导航从未显示过（媒体查询虽然匹配，但输在顺序上）。
+   改这条规则的位置时请先确认它仍在基础规则下面。 */
+@media (max-width: 860px) {
+  .bottom-nav { display: flex; }
+}
 
 @media print {
   .topbar, .sidenav, .bottom-nav, .toast, .btn { display: none !important; }

@@ -102,17 +102,18 @@
         '<div class="card"><div class="card-head"><h3>数据源模式与登录凭据</h3>' +
         '<span class="ch-sub">需要登录的数据源请到「数据源」页面粘贴凭据</span></div>' +
         '<div id="setSources"></div></div>' +
+        //: 自选与模拟持仓已独立成页（「我的持仓」）—— 这里是"改设置"的地方，
+        //: 不适合放需要盯行情的看盘内容。仅保留一个入口指引。
         '<div class="card"><div class="card-head"><h3>自选与模拟持仓</h3>' +
         '<span class="ch-sub">本地保存，不涉及任何真实交易</span></div>' +
-        '<div id="setUserData"></div></div>';
+        '<p class="small muted">已独立为「我的持仓」页面：带实时行情的自选股池 + 模拟持仓浮盈。' +
+        '<a href="#/watch">前往查看 →</a></p></div>';
     }
 
     function load() {
-      return Promise.all([api.settings(), api.watchlist(), api.portfolio()])
+      return Promise.all([api.settings()])
         .then(function (results) {
           state.settings = results[0];
-          state.watchlist = results[1];
-          state.portfolio = results[2];
           paint();
         })
         .catch(function (error) {
@@ -154,7 +155,6 @@
       paintTabs();
       paintSection();
       paintSources();
-      paintUserData();
     }
 
     function paintSection() {
@@ -282,46 +282,6 @@
         '</div>';
     }
 
-    function paintUserData() {
-      var watchlist = (state.watchlist || {}).items || [];
-      var portfolio = state.portfolio || {};
-      var html = '<div class="grid cols-2">' +
-        '<div><h4>自选（' + watchlist.length + '）</h4>' +
-        '<p class="small muted" style="margin:4px 0 8px">带实时行情的自选股池在' +
-        '<a href="#/market?tab=watch">「行情中枢 → 自选股池」</a>，这里只做增删与备注维护。</p>' +
-        (watchlist.length
-          ? '<div class="table-wrap" style="max-height:260px"><table class="grid"><thead><tr>' +
-            '<th>代码</th><th>名称</th><th>备注</th><th></th></tr></thead><tbody>' +
-            watchlist.map(function (item) {
-              return '<tr><td class="mono">' + util.esc(item.code) + '</td>' +
-                '<td><a href="#/stock?code=' + util.esc(item.code) + '">' + util.esc(item.name || '--') +
-                '</a></td><td class="small muted">' + util.esc(item.note || '') + '</td>' +
-                '<td><button class="btn sm" data-unwatch="' + util.esc(item.code) + '">移除</button></td></tr>';
-            }).join('') + '</tbody></table></div>'
-          : util.emptyState('自选为空', '在个股详情页点「加入自选」')) +
-        '<div class="btn-row" style="margin-top:8px">' +
-        '<button class="btn sm" id="watchExport">导出自选 CSV</button>' +
-        '<button class="btn sm" id="watchBatch">批量添加</button></div></div>' +
-        '<div><h4>模拟持仓（持有 ' + (portfolio.open_count || 0) + ' / 已平 ' +
-        (portfolio.closed_count || 0) + '）</h4>' +
-        ((portfolio.items || []).length
-          ? '<div class="table-wrap" style="max-height:260px"><table class="grid"><thead><tr>' +
-            '<th>代码</th><th>买入价</th><th>状态</th><th class="n">收益</th><th></th></tr></thead><tbody>' +
-            portfolio.items.map(function (item) {
-              return '<tr><td class="mono">' + util.esc(item.code) + '</td>' +
-                '<td class="n">' + util.num(item.price, 2) + '</td>' +
-                '<td>' + (item.status === 'open' ? util.badge('持有', 'info') : util.badge('已平仓')) + '</td>' +
-                '<td class="n">' + (item.pnl_pct === null || item.pnl_pct === undefined ? '--' : util.pct(item.pnl_pct)) + '</td>' +
-                '<td>' + (item.status === 'open'
-                  ? '<button class="btn sm" data-close-pos="' + item.id + '">平仓</button>'
-                  : '<button class="btn sm danger" data-del-pos="' + item.id + '">删除</button>') +
-                '</td></tr>';
-            }).join('') + '</tbody></table></div>'
-          : util.emptyState('暂无模拟持仓', '在个股详情页点「记入模拟持仓」')) +
-        '</div></div>';
-      util.$('#setUserData').innerHTML = html;
-    }
-
     function pushTest() {
       var webhookInput = util.$('#f_push_wecom_webhook');
       var raw = webhookInput ? webhookInput.value.trim() : '';
@@ -370,32 +330,12 @@
     }
 
     function bind() {
+      //: 自选/持仓相关的分支已随卡片一起移除 —— 那些操作现在归 views/watch.js。
       content.addEventListener('click', function (event) {
-        var node = event.target.closest ? event.target.closest('[data-section],[data-unwatch],[data-close-pos],[data-del-pos],button') : null;
+        var node = event.target.closest ? event.target.closest('[data-section],button') : null;
         if (!node) return;
         var section = node.getAttribute && node.getAttribute('data-section');
         if (section) { state.section = section; paintTabs(); paintSection(); return; }
-        var unwatch = node.getAttribute && node.getAttribute('data-unwatch');
-        if (unwatch) {
-          api.removeWatch([unwatch]).then(function () {
-            util.toast('已移除自选', 'ok');
-            return load();
-          }).catch(function (e) { util.toast(e.message, 'error'); });
-          return;
-        }
-        var closePos = node.getAttribute && node.getAttribute('data-close-pos');
-        if (closePos) { closePositionDialog(Number(closePos)); return; }
-        var delPos = node.getAttribute && node.getAttribute('data-del-pos');
-        if (delPos) {
-          util.confirmDialog('删除持仓记录', '确认删除这条模拟持仓记录？').then(function (yes) {
-            if (!yes) return;
-            api.deletePosition(Number(delPos)).then(function () {
-              util.toast('已删除', 'ok');
-              return load();
-            }).catch(function (e) { util.toast(e.message, 'error'); });
-          });
-          return;
-        }
         switch (node.id) {
           case 'setSave': save(); break;
           case 'setExport': window.location.href = api.apiUrl('api/settings/export'); break;
@@ -413,56 +353,8 @@
           case 'pushTest': pushTest(); break;
           case 'pushMarket': pushMarket(); break;
           case 'pushLog': showPushLog(); break;
-          case 'watchExport': window.location.href = api.apiUrl('api/export/watchlist.csv'); break;
-          case 'watchBatch': batchWatchDialog(); break;
         }
       });
-    }
-
-    function closePositionDialog(id) {
-      var body = util.modal('平仓', '<div class="field"><label>平仓价</label>' +
-        '<input type="number" step="0.01" id="closePrice" placeholder="输入平仓价">' +
-        '</div><div class="field"><label>离场原因</label>' +
-        '<input type="text" id="closeReason" placeholder="例如：破位止损"></div>',
-        [
-          util.el('button', { class: 'btn', text: '取消', onclick: util.closeModal }),
-          util.el('button', {
-            class: 'btn primary', text: '确认平仓',
-            onclick: function () {
-              var price = Number(util.$('#closePrice').value);
-              if (!price) { util.toast('请输入有效价格', 'error'); return; }
-              api.closePosition(id, { price: price, reason: util.$('#closeReason').value })
-                .then(function (data) {
-                  util.closeModal();
-                  util.toast('已平仓，收益 ' + util.fixed(data.pnl_pct, 2) + '%', 'ok');
-                  return load();
-                }).catch(function (e) { util.toast(e.message, 'error'); });
-            }
-          })
-        ]);
-      return body;
-    }
-
-    function batchWatchDialog() {
-      util.modal('批量添加自选',
-        '<div class="field"><label>股票代码（每行一个或用逗号分隔）</label>' +
-        '<textarea id="batchCodes" placeholder="600519&#10;300750,688981"></textarea></div>',
-        [
-          util.el('button', { class: 'btn', text: '取消', onclick: util.closeModal }),
-          util.el('button', {
-            class: 'btn primary', text: '添加',
-            onclick: function () {
-              var codes = util.$('#batchCodes').value.split(/[\s,，]+/).filter(Boolean);
-              if (!codes.length) { util.toast('请输入代码', 'error'); return; }
-              api.addWatchBatch(codes).then(function (data) {
-                util.closeModal();
-                util.toast('新增 ' + data.added.length + ' 只' +
-                  (data.failed.length ? '，失败 ' + data.failed.length + ' 只' : ''), 'ok');
-                return load();
-              }).catch(function (e) { util.toast(e.message, 'error'); });
-            }
-          })
-        ]);
     }
 
     function importDialog() {

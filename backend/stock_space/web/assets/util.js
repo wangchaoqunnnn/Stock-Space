@@ -292,7 +292,8 @@
         return;
       }
       var head = '<tr><th class="col-no">No</th>' + cols.map(function (col, index) {
-        var cls = (col.num ? 'n' : '') + (col.center ? ' c' : '') + (col.noSort ? ' no-sort' : '');
+        var cls = (col.num ? 'n' : '') + (col.center ? ' c' : '') +
+          (col.noSort ? ' no-sort' : '') + (col.cls ? ' ' + col.cls : '');
         var arrow = state.si === index ? (state.asc ? ' <span class="arrow">▲</span>' : ' <span class="arrow">▼</span>') : '';
         return '<th class="' + cls.trim() + '" data-i="' + index + '">' + esc(col.label) + arrow + '</th>';
       }).join('') + '</tr>';
@@ -300,7 +301,9 @@
       var body = arr.map(function (item, index) {
         var cells = cellFn(item, index) || [];
         var tds = cols.map(function (col, ci) {
-          var cls = (col.num ? 'n' : '') + (col.center ? ' c' : '');
+          //: col.cls 让调用方给整列挂类名（例如 .hide-narrow 在窄屏收起该列）
+          var cls = (col.num ? 'n' : '') + (col.center ? ' c' : '') +
+            (col.cls ? ' ' + col.cls : '');
           return '<td class="' + cls.trim() + '">' + (cells[ci] === undefined || cells[ci] === null ? '' : cells[ci]) + '</td>';
         }).join('');
         var code = item && (item.code || item.key) ? esc(item.code || item.key) : '';

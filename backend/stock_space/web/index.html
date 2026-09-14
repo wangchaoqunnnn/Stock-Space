@@ -64,6 +64,10 @@
       <a class="nav-item" href="#/stock" data-nav="stock">个股详情</a>
     </div>
     <div class="nav-group">
+      <p class="nav-title">我的</p>
+      <a class="nav-item" href="#/watch" data-nav="watch">我的持仓</a>
+    </div>
+    <div class="nav-group">
       <p class="nav-title">数据与运维</p>
       <a class="nav-item" href="#/datasources" data-nav="datasources">数据源</a>
       <a class="nav-item" href="#/news" data-nav="news">资讯公告</a>
@@ -88,12 +92,12 @@
   </main>
 </div>
 
-<!-- 移动端底部导航 -->
+<!-- 移动端底部导航（5 项，超出会挤压触控目标） -->
 <nav class="bottom-nav" id="bottomNav" aria-label="底部导航">
   <a href="#/dashboard" data-nav="dashboard"><span class="bn-ico">▦</span><span>总览</span></a>
   <a href="#/screener" data-nav="screener"><span class="bn-ico">◎</span><span>选股</span></a>
+  <a href="#/watch" data-nav="watch"><span class="bn-ico">★</span><span>持仓</span></a>
   <a href="#/emotion" data-nav="emotion"><span class="bn-ico">◈</span><span>情绪</span></a>
-  <a href="#/datasources" data-nav="datasources"><span class="bn-ico">⇄</span><span>数据源</span></a>
   <a href="#/settings" data-nav="settings"><span class="bn-ico">⚙</span><span>配置</span></a>
 </nav>
 
@@ -109,6 +113,7 @@
 <script src="assets/views/emotion.js?v={{ASSET_VERSION}}"></script>
 <script src="assets/views/screener.js?v={{ASSET_VERSION}}"></script>
 <script src="assets/views/stock.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/watch.js?v={{ASSET_VERSION}}"></script>
 <script src="assets/views/backtest.js?v={{ASSET_VERSION}}"></script>
 <script src="assets/views/datasources.js?v={{ASSET_VERSION}}"></script>
 <script src="assets/views/news.js?v={{ASSET_VERSION}}"></script>

@@ -807,17 +807,40 @@ class TestUserAPI:
         finally:
             await client.request("DELETE", "/api/watchlist", json={"codes": codes})
 
-    async def test_watchlist_tab_is_wired_into_market_view(self, client):
-        """自选池页签必须真的接进行情中枢（含深链接与行内按钮冲突处理）。
+    async def test_watchlist_has_dedicated_page(self, client):
+        """自选与模拟持仓必须独立成页，而不是塞在「用户配置」里。
 
-        这里读前端源码做静态断言：后端接口对了但页面没接上，用户照样找不到入口。
+        真实问题：自选原先只是「用户配置」页底部的一张卡片，展示字段只有
+        代码/名称/备注/移除 —— 既没有行情，页面定位也是"改设置"而不是"看盘"。
+        现已独立为「我的持仓」页面（#/watch），这里锁定三件事：
+          1. 页面已注册、已进导航、脚本已加载；
+          2. 自选带实时行情、持仓按现价算浮动盈亏；
+          3. 设置页不再重复渲染这份数据，只留入口指引。
         """
-        js = (await client.get("/assets/views/market.js")).text
-        assert "自选股池" in js, "行情中枢缺少「自选股池」页签"
-        assert "state.tab === 'watch'" in js, "页签未接入 load() 分发"
-        assert "loadWatch" in js, "缺少自选池渲染函数"
-        assert "params.tab" in js, "自选池页签应支持 #/market?tab=watch 深链接"
+        html = (await client.get("/")).text
+        assert 'href="#/watch"' in html, "侧边栏缺少「我的持仓」入口"
+        assert 'data-nav="watch"' in html, "导航项缺少 data-nav=watch（无法高亮）"
+        assert "views/watch.js" in html, "watch.js 未加入脚本加载列表"
+
+        js = (await client.get("/assets/views/watch.js")).text
+        assert "SS.views.watch" in js, "未注册 SS.views.watch"
+        assert "自选股池" in js and "模拟持仓" in js, "页面缺少两个分区"
+        assert "api.quotes" in js, "自选池必须取实时行情"
+        assert "market_value" in js and "pnl_pct" in js, "持仓必须计算市值与浮动盈亏"
         assert "data-unwatch" in js, "自选池缺少移除按钮"
+        assert "data-close-pos" in js, "持仓缺少平仓按钮"
+        assert "moneySigned" in js, "浮盈浮亏必须带符号与涨跌配色"
+
+        #: 行情中枢不再重复提供自选池（避免两处维护同一份数据）
+        market = (await client.get("/assets/views/market.js")).text
+        assert "自选股池不在这里" in market, "行情中枢应说明自选池已迁走"
+        assert "loadWatch" not in market, "行情中枢不应再保留自选池渲染函数"
+
+        #: 设置页只留指引，不再渲染自选/持仓表格
+        settings = (await client.get("/assets/views/settings.js")).text
+        assert 'href="#/watch"' in settings, "设置页应给出「我的持仓」直达链接"
+        for dead in ("paintUserData", "closePositionDialog", "batchWatchDialog", "setUserData"):
+            assert dead not in settings, f"设置页残留已迁移的代码: {dead}"
 
         #: 行内按钮不能触发整行跳转，否则点「移除」会同时打开个股详情
         util = (await client.get("/assets/util.js")).text
@@ -826,10 +849,38 @@ class TestUserAPI:
 
         #: 加自选后要明确指路，否则用户不知道去哪儿看
         stock = (await client.get("/assets/views/stock.js")).text
-        assert "自选股池" in stock, "「加入自选」的提示应告知自选池位置"
+        assert "我的持仓" in stock, "「加入自选」的提示应告知自选池位置"
 
-        settings = (await client.get("/assets/views/settings.js")).text
-        assert "tab=watch" in settings, "设置页应给出自选池的直达链接"
+    async def test_bottom_nav_media_query_wins_over_base_rule(self, client):
+        """移动端底部导航必须真的显示得出来。
+
+        真实事故：`.bottom-nav` 的基础规则是 `display: none`（桌面隐藏），
+        而媒体查询里 `display: flex` 原先被放在**基础规则之前**。两者特异性
+        完全相同（0,1,0），CSS 只按源码顺序决胜负 —— 于是 `display:none` 永远胜出，
+        **移动端底部导航从未显示过**（媒体查询确实匹配上了，但输在顺序上）。
+
+        坑在于纯靠读代码很难发现：媒体查询存在、写得也对，只是位置不对。
+        """
+        css = (await client.get("/assets/app.css")).text
+        cleaned = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+
+        def pos(pattern):
+            m = re.search(pattern, cleaned)
+            assert m, f"CSS 里找不到：{pattern}"
+            return m.start()
+
+        base = pos(r"\.bottom-nav\s*\{[^}]*display\s*:\s*none")
+        mobile = pos(r"@media\s*\(max-width:\s*860px\)\s*\{[^@]*?\.bottom-nav\s*\{[^}]*display\s*:\s*flex")
+        assert mobile > base, (
+            "`.bottom-nav { display: flex }`（≤860px）必须排在基础规则 "
+            "`.bottom-nav { display: none }` 之后，否则同特异性下后者胜出，"
+            "移动端底栏不会显示"
+        )
+
+        #: 同类风险：窄屏单元格内边距的覆盖也必须晚于基础规则
+        base_pad = pos(r"table\.grid th,\s*table\.grid td\s*\{")
+        assert pos(r"table\.grid th,\s*table\.grid td\s*\{\s*padding:\s*6px 5px") > base_pad, \
+            "窄屏 padding 覆盖必须晚于 table.grid 基础规则，否则不生效"
 
     async def test_portfolio_lifecycle(self, client, warm_market):
         code = warm_market[3].code

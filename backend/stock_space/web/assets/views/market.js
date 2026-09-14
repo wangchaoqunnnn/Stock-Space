@@ -9,13 +9,11 @@
   var util = SS.util, api = SS.api, charts = SS.charts;
 
   function render(content, ctx) {
-    var params = (ctx && ctx.params) || {};
-    //: 支持 #/market?tab=watch 直接定位标签页（自选池的入口链接用它）
-    var initial = params.tab || 'watch';
-    var state = { tab: initial, rankKind: 'gainers', sectorKind: 'industry', limit: 50 };
+    var state = { tab: 'rank', rankKind: 'gainers', sectorKind: 'industry', limit: 50 };
 
+    //: 自选股池不在这里 —— 它已独立成「我的持仓」页面（views/watch.js）。
+    //: 行情中枢只做"全市场"视角（榜单/板块/涨停/宽度/指数/资金流）。
     var TABS = [
-      { key: 'watch', label: '自选股池' },
       { key: 'rank', label: '榜单' },
       { key: 'sectors', label: '板块' },
       { key: 'limit', label: '涨停池与梯队' },
@@ -44,7 +42,6 @@
       body.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>加载中…</p></div>';
       var sub = util.$('#mktSub');
 
-      if (state.tab === 'watch') return loadWatch(body, sub);
       if (state.tab === 'rank') return loadRank(body, sub);
       if (state.tab === 'sectors') return loadSectors(body, sub);
       if (state.tab === 'limit') return loadLimit(body, sub);
@@ -52,93 +49,6 @@
       if (state.tab === 'indices') return loadIndices(body, sub);
       if (state.tab === 'flow') return loadFlow(body, sub);
       return Promise.resolve();
-    }
-
-    /**
-     * 自选股池 —— 带实时行情的自选列表。
-     *
-     * 背景：自选原先只能在「用户配置」页底部看到，而且只有 代码/名称/备注/移除，
-     * **没有行情**，算不上"股池"。这里把它放进行情中枢作为第一个标签页：
-     * 自选本身就是"我要盯的票"，与榜单/板块同属看盘动作，放一起比塞进设置页合理。
-     */
-    function loadWatch(body, sub) {
-      return api.watchlist().then(function (data) {
-        var items = (data && data.items) || [];
-        if (!items.length) {
-          if (sub) sub.textContent = '自选股池 · 0 只';
-          body.innerHTML = '<div class="card"><div class="card-head"><h3>自选股池</h3></div>' +
-            util.emptyState('自选池还是空的',
-              '到「个股详情」页点「加入自选」，或点右侧按钮批量添加') +
-            '<div class="btn-row" style="margin-top:10px">' +
-            '<button class="btn sm primary" id="watchAddBatch">批量添加代码</button>' +
-            '<button class="btn sm" id="watchGoScreener">去选股</button></div></div>';
-          return;
-        }
-        var codes = items.map(function (i) { return i.code; });
-        return api.quotes(codes).then(function (quotes) {
-          var byCode = {};
-          (quotes.items || []).forEach(function (q) { byCode[q.code] = q; });
-          //: 以自选表为基准合并行情 —— 某只票上游取不到时仍要出现在池子里（显示 --），
-          //: 而不是静默消失
-          var rows = items.map(function (it) {
-            var q = byCode[it.code] || {};
-            return {
-              code: it.code, name: q.name || it.name || '--', note: it.note || '',
-              price: q.price, change_pct: q.change_pct, change: q.change,
-              amount: q.amount, turnover_rate: q.turnover_rate,
-              volume_ratio: q.volume_ratio, amplitude: q.amplitude,
-              total_mv: q.total_mv, board: q.board, missing: !byCode[it.code]
-            };
-          });
-          var up = rows.filter(function (r) { return util.toNum(r.change_pct) > 0; }).length;
-          var down = rows.filter(function (r) { return util.toNum(r.change_pct) < 0; }).length;
-          if (sub) {
-            sub.textContent = '自选股池 · ' + rows.length + ' 只 · 涨 ' + up + ' / 跌 ' + down +
-              ' · 源 ' + ((quotes && quotes.source) || '--') + ' · ' + ((quotes && quotes.as_of) || '');
-          }
-          body.innerHTML = '<div class="card"><div class="card-head"><h3>自选股池</h3>' +
-            '<div class="btn-row">' +
-            '<button class="btn sm" id="watchAddBatch">批量添加</button>' +
-            '<button class="btn sm" id="watchExport">导出 CSV</button>' +
-            '</div></div>' +
-            '<div class="ch-sub" style="margin-bottom:8px">点击行查看个股 · 「移除」仅从自选池删除</div>' +
-            '<div id="watchTable"></div></div>';
-
-          var cols = [
-            { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
-            { label: '板块', key: 'board' },
-            { label: '现价', num: true, sort: function (i) { return i.price; } },
-            { label: '涨跌幅', num: true, sort: function (i) { return i.change_pct; } },
-            { label: '涨跌额', num: true, sort: function (i) { return i.change; } },
-            { label: '成交额', num: true, sort: function (i) { return i.amount; } },
-            { label: '换手率', num: true, sort: function (i) { return i.turnover_rate; } },
-            { label: '量比', num: true, sort: function (i) { return i.volume_ratio; } },
-            { label: '振幅', num: true, sort: function (i) { return i.amplitude; } },
-            { label: '总市值', num: true, sort: function (i) { return i.total_mv; } },
-            { label: '备注', key: 'note' },
-            { label: '', sort: null }
-          ];
-          util.sortableTable(util.$('#watchTable'), cols, rows, function (item) {
-            var price = item.missing ? '<span class="faint">--</span>' : util.num(item.price, 2);
-            return [
-              '<span class="mono">' + util.esc(item.code) + '</span>',
-              util.esc(item.name),
-              '<span class="faint small">' + util.esc(item.board || '') + '</span>',
-              price,
-              item.missing ? '<span class="faint">--</span>' : util.pct(item.change_pct),
-              item.missing ? '<span class="faint">--</span>'
-                : util.num(item.change, 2, { colored: true, sign: true }),
-              item.missing ? '<span class="faint">--</span>' : util.money(item.amount),
-              item.missing ? '<span class="faint">--</span>' : util.fixed(item.turnover_rate, 2) + '%',
-              item.missing ? '<span class="faint">--</span>' : util.fixed(item.volume_ratio, 2),
-              item.missing ? '<span class="faint">--</span>' : util.fixed(item.amplitude, 2) + '%',
-              item.missing ? '<span class="faint">--</span>' : util.money(item.total_mv),
-              '<span class="small muted">' + util.esc(item.note) + '</span>',
-              '<button class="btn sm" data-unwatch="' + util.esc(item.code) + '">移除</button>'
-            ];
-          }, { initialSort: 4, initialAsc: false, onRowClick: openStock });
-        });
-      }).catch(function (error) { fail(body, '自选股池不可用', error); });
     }
 
     function loadRank(body, sub) {
@@ -379,49 +289,6 @@
         }
         var rankBtn = event.target.closest ? event.target.closest('[data-rank]') : null;
         if (rankBtn) { state.rankKind = rankBtn.dataset.rank; load(); return; }
-
-        // ---- 自选池操作 ----
-        var unwatch = event.target.closest ? event.target.closest('[data-unwatch]') : null;
-        if (unwatch) {
-          var code = unwatch.dataset.unwatch;
-          unwatch.disabled = true;
-          api.removeWatch([code]).then(function () {
-            util.toast('已从自选移除 ' + code, 'ok');
-            return load();
-          }).catch(function (error) {
-            util.toast('移除失败: ' + error.message, 'error', 6000);
-            unwatch.disabled = false;
-          });
-          return;
-        }
-        if (event.target.closest && event.target.closest('#watchExport')) {
-          window.location.href = api.apiUrl('api/export/watchlist.csv');
-          return;
-        }
-        if (event.target.closest && event.target.closest('#watchAddBatch')) {
-          util.modal('批量添加自选',
-            '<div class="field"><label>证券代码（逗号/空格/换行分隔）</label>' +
-            '<textarea id="watchCodes" rows="4" placeholder="600519, 000001, 300750"></textarea></div>' +
-            '<div class="btn-row"><button class="btn primary" id="watchCodesOk">添加</button></div>');
-          var okBtn = util.$('#watchCodesOk');
-          if (okBtn) okBtn.addEventListener('click', function () {
-            var raw = (util.$('#watchCodes') || {}).value || '';
-            var codes = raw.split(/[\s,，;；]+/).filter(Boolean);
-            if (!codes.length) { util.toast('请先填写代码', 'error'); return; }
-            api.addWatchBatch(codes).then(function (data) {
-              util.closeModal();
-              util.toast('已添加 ' + ((data && data.added) || codes.length) + ' 只到自选', 'ok');
-              return load();
-            }).catch(function (error) {
-              util.toast('添加失败: ' + error.message, 'error', 6000);
-            });
-          });
-          return;
-        }
-        if (event.target.closest && event.target.closest('#watchGoScreener')) {
-          SS.app.navigate('#/screener');
-          return;
-        }
         var sectorBtn = event.target.closest ? event.target.closest('[data-sector]') : null;
         if (sectorBtn) { state.sectorKind = sectorBtn.dataset.sector; load(); return; }
         var reload = event.target.closest ? event.target.closest('#mktReload') : null;

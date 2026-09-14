@@ -259,7 +259,7 @@
       }).then(function () {
         //: 明确告知去哪个页面看自选池 —— 此前自选只能在「用户配置」页底部看到，
         //: 用户加完根本不知道上哪儿找。
-        util.toast('已加入自选 · 在「行情中枢 → 自选股池」查看', 'ok', 6000);
+        util.toast('已加入自选 · 在「我的持仓」页查看', 'ok', 6000);
       }).catch(function (error) { util.toast(error.message, 'error'); });
     }
 
