@@ -326,6 +326,9 @@
         }
         var row = event.target.closest ? event.target.closest('tr[data-code]') : null;
         if (row && opts.onRowClick) {
+          //: 行内按钮（如自选池的「移除」）不应触发整行的点击动作 ——
+          //: 否则点"移除"会同时跳转到个股详情页。
+          if (event.target.closest && event.target.closest('button, a, input, select')) return;
           var code = row.dataset.code;
           var item = items.filter(function (it) { return (it.code || it.key) === code; })[0];
           if (item) opts.onRowClick(item, event);

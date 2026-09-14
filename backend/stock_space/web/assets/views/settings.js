@@ -287,6 +287,8 @@
       var portfolio = state.portfolio || {};
       var html = '<div class="grid cols-2">' +
         '<div><h4>自选（' + watchlist.length + '）</h4>' +
+        '<p class="small muted" style="margin:4px 0 8px">带实时行情的自选股池在' +
+        '<a href="#/market?tab=watch">「行情中枢 → 自选股池」</a>，这里只做增删与备注维护。</p>' +
         (watchlist.length
           ? '<div class="table-wrap" style="max-height:260px"><table class="grid"><thead><tr>' +
             '<th>代码</th><th>名称</th><th>备注</th><th></th></tr></thead><tbody>' +

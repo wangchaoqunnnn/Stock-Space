@@ -779,6 +779,58 @@ class TestUserAPI:
         response = await client.put("/api/watchlist/600519/note", json={"note": "x"})
         assert response.status_code == 404
 
+    async def test_watchlist_pool_has_live_quotes(self, client, warm_market):
+        """自选股池必须是「带行情的表格」，而不只是设置页里的代码清单。
+
+        真实问题：自选原先只能在「用户配置」页底部看到，展示字段只有
+        代码/名称/备注/移除 —— 没有任何行情，用户加完自选根本不知道
+        上哪儿看。现在行情中枢新增「自选股池」页签，这里锁定两条链路：
+          1. 批量取行情接口能吃下自选代码集合，且返回真实字段；
+          2. 行情缺失时该票仍留在池子里（不能静默消失）。
+        """
+        codes = [warm_market[0].code, warm_market[1].code]
+        unwrap(await client.post("/api/watchlist/batch", json={"codes": codes}))
+        try:
+            watch = unwrap(await client.get("/api/watchlist"))
+            saved = [i["code"] for i in watch["items"]]
+            assert set(codes) <= set(saved), f"自选未写入：{saved}"
+
+            quotes = unwrap(await client.get("/api/quotes", params={"codes": ",".join(saved)}))
+            items = quotes["items"]
+            assert items, "批量行情返回为空"
+            by_code = {q["code"]: q for q in items}
+            #: 自选池表格要展示的字段必须存在，否则页面只能显示空列
+            for field in ("price", "change_pct", "amount", "turnover_rate",
+                          "volume_ratio", "amplitude", "total_mv", "board"):
+                assert field in items[0], f"行情缺少自选池需要的字段: {field}"
+            assert set(by_code) >= set(saved), "有自选代码取不到行情"
+        finally:
+            await client.request("DELETE", "/api/watchlist", json={"codes": codes})
+
+    async def test_watchlist_tab_is_wired_into_market_view(self, client):
+        """自选池页签必须真的接进行情中枢（含深链接与行内按钮冲突处理）。
+
+        这里读前端源码做静态断言：后端接口对了但页面没接上，用户照样找不到入口。
+        """
+        js = (await client.get("/assets/views/market.js")).text
+        assert "自选股池" in js, "行情中枢缺少「自选股池」页签"
+        assert "state.tab === 'watch'" in js, "页签未接入 load() 分发"
+        assert "loadWatch" in js, "缺少自选池渲染函数"
+        assert "params.tab" in js, "自选池页签应支持 #/market?tab=watch 深链接"
+        assert "data-unwatch" in js, "自选池缺少移除按钮"
+
+        #: 行内按钮不能触发整行跳转，否则点「移除」会同时打开个股详情
+        util = (await client.get("/assets/util.js")).text
+        assert "closest('button, a, input, select')" in util, \
+            "sortableTable 需忽略行内按钮的点击，避免误跳转"
+
+        #: 加自选后要明确指路，否则用户不知道去哪儿看
+        stock = (await client.get("/assets/views/stock.js")).text
+        assert "自选股池" in stock, "「加入自选」的提示应告知自选池位置"
+
+        settings = (await client.get("/assets/views/settings.js")).text
+        assert "tab=watch" in settings, "设置页应给出自选池的直达链接"
+
     async def test_portfolio_lifecycle(self, client, warm_market):
         code = warm_market[3].code
         opened = unwrap(await client.post("/api/portfolio/open", json={
