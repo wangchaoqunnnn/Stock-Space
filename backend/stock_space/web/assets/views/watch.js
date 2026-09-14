@@ -22,11 +22,13 @@
   SS.views.watch = {
     title: '我的持仓',
     render: function (content, ctx) {
-      var state = { tab: 'watch', portfolio: null, quotes: {} };
+      var state = { tab: 'watch', portfolio: null, quotes: {}, date: '', dates: [] };
 
       var TABS = [
         { key: 'watch', label: '自选股池' },
-        { key: 'portfolio', label: '模拟持仓' }
+        { key: 'portfolio', label: '模拟持仓' },
+        { key: 'history', label: '历史自选池' },
+        { key: 'snapshot', label: '按日回顾' }
       ];
 
       function shell() {
@@ -128,6 +130,8 @@
                 (quotes.as_of ? ' · ' + quotes.as_of : '');
             }
             if (state.tab === 'watch') paintWatch(body, watch, byCode, quotes);
+            else if (state.tab === 'history') paintHistory(body);
+            else if (state.tab === 'snapshot') paintSnapshot(body);
             else paintPortfolio(body, enriched);
           });
         }).catch(function (error) {
@@ -309,6 +313,180 @@
         }
       }
 
+      // ------------------------------------------------------------ 历史自选池
+      /**
+       * 已移出的自选 + 完整的放入/放出事件流水。
+       *
+       * 这一页之所以必要：移出自选原先走硬删除，"何时进的、何时出的"会永久丢失；
+       * 现在 watchlist 改软删除并另存事件流水，这里把两者都展示出来。
+       */
+      function paintHistory(body) {
+        body.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>加载历史…</p></div>';
+        return api.watchHistory(500).then(function (data) {
+          var items = (data && data.items) || [];
+          var events = (data && data.events) || [];
+
+          var html = '<div class="card"><div class="card-head"><h3>历史自选（已移出 ' +
+            items.length + '）</h3>' +
+            '<span class="ch-sub">移出后仍保留放入/放出时间，可用于回看当时的判断</span></div>';
+          if (!items.length) {
+            html += util.emptyState('还没有历史自选', '从自选池移出的股票会出现在这里');
+          } else {
+            html += '<div id="histTable"></div>';
+          }
+          html += '</div>';
+
+          html += '<div class="card"><div class="card-head"><h3>进出流水（' + events.length + ' 条）</h3>' +
+            '<span class="ch-sub">同一只股票反复加入/移出时，只有流水能还原真实过程</span></div>';
+          if (!events.length) {
+            html += util.emptyState('暂无流水');
+          } else {
+            html += '<div id="eventTable"></div>';
+          }
+          html += '</div>';
+          body.innerHTML = html;
+
+          if (items.length) {
+            var rows = items.map(function (i) {
+              var holdMs = (i.removed_at || 0) - (i.added_at || 0);
+              return {
+                code: i.code, name: i.name, note: i.note,
+                added_at_text: i.added_at_text, removed_at_text: i.removed_at_text,
+                hold_days: holdMs > 0 ? Math.round(holdMs / 86400) : 0,
+                hold_hours: holdMs > 0 ? Math.round(holdMs / 3600) : 0
+              };
+            });
+            util.sortableTable(util.$('#histTable'), [
+              { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
+              { label: '放入时间', key: 'added_at_text' },
+              { label: '放出时间', key: 'removed_at_text' },
+              { label: '停留', num: true, sort: function (i) { return i.hold_hours; } },
+              { label: '备注', key: 'note' },
+              { label: '' }
+            ], rows, function (item) {
+              return [
+                '<span class="mono">' + util.esc(item.code) + '</span>',
+                util.esc(item.name),
+                '<span class="small muted">' + util.esc(item.added_at_text) + '</span>',
+                '<span class="small muted">' + util.esc(item.removed_at_text) + '</span>',
+                item.hold_days >= 1 ? item.hold_days + ' 天' : item.hold_hours + ' 小时',
+                '<span class="small muted">' + util.esc(item.note) + '</span>',
+                '<button class="btn sm" data-readd="' + util.esc(item.code) + '">重新加入</button>'
+              ];
+            }, { initialSort: 3, initialAsc: false });
+          }
+
+          if (events.length) {
+            util.sortableTable(util.$('#eventTable'), [
+              { label: '时间', key: 'event_at_text' },
+              { label: '交易日', key: 'trade_date' },
+              { label: '代码', key: 'code' },
+              { label: '名称', key: 'name' },
+              { label: '动作', key: 'action' },
+              { label: '价格', num: true, sort: function (i) { return i.price; } }
+            ], events, function (item) {
+              var isAdd = item.action === 'add';
+              return [
+                '<span class="small muted">' + util.esc(item.event_at_text) + '</span>',
+                util.esc(item.trade_date),
+                '<span class="mono">' + util.esc(item.code) + '</span>',
+                util.esc(item.name || '--'),
+                isAdd ? util.badge('放入', 'ok') : util.badge('放出', 'warn'),
+                item.price ? util.num(item.price, 2) : '--'
+              ];
+            }, { initialSort: 0, initialAsc: false });
+          }
+        }).catch(function (error) {
+          body.innerHTML = util.notice('bad', '历史自选不可用', util.esc(error.message));
+        });
+      }
+
+      // ------------------------------------------------------------ 按日回顾（日历）
+      /**
+       * 日历：按交易日回看当天的自选池与持仓快照。
+       *
+       * 快照只在收盘后写一次，因此可选的日期由后端 /api/snapshots/dates 给出，
+       * 只列**真正有数据**的日子。
+       */
+      function paintSnapshot(body) {
+        body.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>加载快照…</p></div>';
+        return api.snapshotDay(state.date).then(function (data) {
+          state.dates = (data && data.available) || [];
+          var day = (data && data.trade_date) || '';
+          state.date = day;
+          var watch = (data && data.watchlist) || [];
+          var positions = (data && data.positions) || [];
+
+          var html = util.dateBar({
+            id: 'snap', dates: state.dates, selected: day, label: '查看日期'
+          });
+
+          html += '<div class="card"><div class="card-head"><h3>当日自选池（' + watch.length + '）</h3>' +
+            '<span class="ch-sub">' + util.esc(day || '—') + ' 收盘快照</span></div>';
+          html += watch.length
+            ? '<div id="snapWatch"></div>'
+            : util.emptyState('该日没有自选快照', '快照在交易日收盘后自动写入');
+          html += '</div>';
+
+          html += '<div class="card"><div class="card-head"><h3>当日模拟持仓（' + positions.length + '）</h3>' +
+            '<span class="ch-sub">涨跌幅为自建仓价起的累计值</span></div>';
+          html += positions.length
+            ? '<div id="snapPos"></div>'
+            : util.emptyState('该日没有持仓快照');
+          html += '</div>';
+          body.innerHTML = html;
+
+          util.bindDateBar(body, 'snap', function (date) {
+            state.date = date;
+            paintSnapshot(body);
+          });
+
+          if (watch.length) {
+            util.sortableTable(util.$('#snapWatch'), [
+              { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
+              { label: '收盘价', num: true, sort: function (i) { return i.price; } },
+              { label: '涨跌幅', num: true, sort: function (i) { return i.change_pct; } },
+              { label: '成交额', num: true, sort: function (i) { return i.amount; } },
+              { label: '数据源', key: 'source' }
+            ], watch, function (item) {
+              return [
+                '<span class="mono">' + util.esc(item.code) + '</span>',
+                util.esc(item.name),
+                util.num(item.price, 2),
+                util.pct(item.change_pct),
+                util.money(item.amount),
+                '<span class="small muted">' + util.esc(item.source || '--') + '</span>'
+              ];
+            }, { initialSort: 3, initialAsc: false });
+          }
+
+          if (positions.length) {
+            util.sortableTable(util.$('#snapPos'), [
+              { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
+              { label: '建仓价', num: true, sort: function (i) { return i.entry_price; } },
+              { label: '当日收盘', num: true, sort: function (i) { return i.close; } },
+              { label: '自买入涨跌', num: true, sort: function (i) { return i.gain_pct; } },
+              { label: '浮动盈亏', num: true, sort: function (i) { return i.gain_amount; } },
+              { label: '持有', num: true, sort: function (i) { return i.hold_days; } },
+              { label: '状态', key: 'status' }
+            ], positions, function (item) {
+              return [
+                '<span class="mono">' + util.esc(item.code) + '</span>',
+                util.esc(item.name || '--'),
+                util.num(item.entry_price, 2),
+                util.num(item.close, 2),
+                util.pct(item.gain_pct),
+                moneySigned(item.gain_amount),
+                item.hold_days + ' 天',
+                item.status === 'open' ? util.badge('持有', 'info') : util.badge('已平仓')
+              ];
+            }, { initialSort: 5, initialAsc: false });
+          }
+        }).catch(function (error) {
+          body.innerHTML = util.notice('bad', '快照不可用', util.esc(error.message));
+        });
+      }
+
       // ------------------------------------------------------------ 交互
       function openStock(item) {
         if (item && item.code) SS.app.navigate('#/stock?code=' + item.code);
@@ -376,11 +554,30 @@
             var code = unwatch.getAttribute('data-unwatch');
             unwatch.disabled = true;
             api.removeWatch([code]).then(function () {
-              util.toast('已从自选移除 ' + code, 'ok');
+              util.toast('已移入历史自选 ' + code, 'ok');
               return paint();
             }).catch(function (e) {
               util.toast('移除失败: ' + e.message, 'error');
               unwatch.disabled = false;
+            });
+            return;
+          }
+
+          //: 从历史池重新加入
+          var readd = closest('[data-readd]');
+          if (readd) {
+            var readdCode = readd.getAttribute('data-readd');
+            readd.disabled = true;
+            api.addWatch({ code: readdCode, name: '', note: '' }).then(function () {
+              util.toast('已重新加入自选 ' + readdCode, 'ok');
+              state.tab = 'watch';
+              util.$$('[data-wtab]').forEach(function (n) {
+                n.classList.toggle('active', n.getAttribute('data-wtab') === 'watch');
+              });
+              return paint();
+            }).catch(function (e) {
+              util.toast('重新加入失败: ' + e.message, 'error');
+              readd.disabled = false;
             });
             return;
           }

@@ -9,7 +9,7 @@
   var util = SS.util, api = SS.api, charts = SS.charts;
 
   function render(content, ctx) {
-    var state = { tab: 'rank', rankKind: 'gainers', sectorKind: 'industry', limit: 50 };
+    var state = { tab: 'rank', rankKind: 'gainers', sectorKind: 'industry', limit: 50, date: '' };
 
     //: 自选股池不在这里 —— 它已独立成「我的持仓」页面（views/watch.js）。
     //: 行情中枢只做"全市场"视角（榜单/板块/涨停/宽度/指数/资金流）。
@@ -19,7 +19,8 @@
       { key: 'limit', label: '涨停池与梯队' },
       { key: 'breadth', label: '市场宽度' },
       { key: 'indices', label: '指数速览' },
-      { key: 'flow', label: '板块资金流' }
+      { key: 'flow', label: '板块资金流' },
+      { key: 'snapshot', label: '按日回顾' }
     ];
 
     function shell() {
@@ -48,7 +49,97 @@
       if (state.tab === 'breadth') return loadBreadth(body, sub);
       if (state.tab === 'indices') return loadIndices(body, sub);
       if (state.tab === 'flow') return loadFlow(body, sub);
+      if (state.tab === 'snapshot') return loadSnapshot(body, sub);
       return Promise.resolve();
+    }
+
+    /**
+     * 按日回顾 —— 日历选择交易日，回看当天的自选池表现。
+     *
+     * 说明：快照目前只覆盖**自选池与模拟持仓**（收盘后写一次），
+     * 因此这里展示的是"自选池在那一天的表现"，作为当日市场温度的旁证；
+     * 榜单/板块这类全市场截面没有按日留存，故不做假数据填充。
+     */
+    function loadSnapshot(body, sub) {
+      return api.snapshotDay(state.date || '').then(function (data) {
+        state.date = (data && data.trade_date) || '';
+        var dates = (data && data.available) || [];
+        var watch = (data && data.watchlist) || [];
+        var positions = (data && data.positions) || [];
+        if (sub) {
+          sub.textContent = '按日回顾 · ' + (state.date || '—') +
+            ' · 自选 ' + watch.length + ' 只 / 持仓 ' + positions.length + ' 笔';
+        }
+        var up = watch.filter(function (w) { return util.toNum(w.change_pct) > 0; }).length;
+        var down = watch.filter(function (w) { return util.toNum(w.change_pct) < 0; }).length;
+
+        var html = util.dateBar({
+          id: 'mktSnap', dates: dates, selected: state.date, label: '查看日期'
+        });
+        html += '<div class="grid kpi">' +
+          util.kpi('当日自选', util.count(watch.length), '涨 ' + up + ' / 跌 ' + down,
+            up >= down ? 'up' : 'down') +
+          util.kpi('当日持仓', util.count(positions.length), '笔') +
+          util.kpi('快照日期', util.esc(state.date || '--'), '收盘后写入') +
+          util.kpi('可回看天数', util.count(dates.length), '个交易日') +
+          '</div>';
+
+        html += '<div class="card"><div class="card-head"><h3>当日自选池表现</h3>' +
+          '<span class="ch-sub">' + util.esc(state.date || '—') + ' 收盘快照</span></div>';
+        html += watch.length
+          ? '<div id="mktSnapBox"></div>'
+          : util.emptyState('该日没有自选快照',
+              '快照在交易日收盘后自动写入；可点日历条上的「补写快照」立即写一次');
+        html += '</div>';
+
+        html += '<div class="card"><div class="card-head"><h3>当日模拟持仓</h3>' +
+          '<span class="ch-sub">涨跌幅为自建仓价起的累计值</span></div>';
+        html += positions.length
+          ? '<div id="mktSnapPos"></div>'
+          : util.emptyState('该日没有持仓快照');
+        html += '</div>';
+        body.innerHTML = html;
+
+        util.bindDateBar(body, 'mktSnap', function (date) {
+          state.date = date;
+          load();
+        });
+
+        if (watch.length) {
+          util.sortableTable(util.$('#mktSnapBox'), [
+            { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
+            { label: '收盘价', num: true, sort: function (i) { return i.price; } },
+            { label: '涨跌幅', num: true, sort: function (i) { return i.change_pct; } },
+            { label: '成交额', num: true, sort: function (i) { return i.amount; } }
+          ], watch, function (item) {
+            return [
+              '<span class="mono">' + util.esc(item.code) + '</span>',
+              util.esc(item.name || '--'),
+              util.num(item.price, 2),
+              util.pct(item.change_pct),
+              util.money(item.amount)
+            ];
+          }, { initialSort: 3, initialAsc: false, onRowClick: openStock });
+        }
+        if (positions.length) {
+          util.sortableTable(util.$('#mktSnapPos'), [
+            { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
+            { label: '建仓价', num: true, sort: function (i) { return i.entry_price; } },
+            { label: '当日收盘', num: true, sort: function (i) { return i.close; } },
+            { label: '自买入涨跌', num: true, sort: function (i) { return i.gain_pct; } },
+            { label: '浮动盈亏', num: true, sort: function (i) { return i.gain_amount; } }
+          ], positions, function (item) {
+            return [
+              '<span class="mono">' + util.esc(item.code) + '</span>',
+              util.esc(item.name || '--'),
+              util.num(item.entry_price, 2),
+              util.num(item.close, 2),
+              util.pct(item.gain_pct),
+              util.num(item.gain_amount, 2, { colored: true, sign: true })
+            ];
+          }, { initialSort: 4, initialAsc: false, onRowClick: openStock });
+        }
+      }).catch(function (error) { fail(body, '快照不可用', error); });
     }
 
     function loadRank(body, sub) {

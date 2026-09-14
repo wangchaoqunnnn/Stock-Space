@@ -1173,6 +1173,84 @@ class TestUserAPI:
             await client.request("DELETE", "/api/portfolio/%d" % opened["id"])
             await client.request("DELETE", "/api/watchlist", json={"codes": [code]})
 
+    async def test_snapshot_historical_uses_that_days_close(self, client, warm_market):
+        """补写**历史日期**时必须用当日收盘价，而不是今天的实时价。
+
+        真实事故（自查发现）：`snapshot_all()` 无论传什么日期都用
+        `registry.quotes()` 的实时行情，于是补写 2026-09-11 得到的是**今天**的价格 ——
+        日历上两天显示完全相同的数字，看起来"能切日期"，数据却是错的。
+        这比直接报错更危险：用户会据此判断历史持仓表现。
+        """
+        from stock_space.services import snapshot_service
+        from stock_space.store.kline_store import kline_store
+
+        code = warm_market[10].code
+        kline = kline_store.get(code, 60)
+        if kline is None or len(kline.bars) < 3:
+            return          # 无日线数据时跳过（synthetic 模式理论上都有）
+        target = str(kline.bars[-3].date)       # 取一个**非今天**的历史交易日
+        if target == __import__("stock_space.core.util", fromlist=["x"]).today_str():
+            return
+
+        unwrap(await client.post("/api/watchlist", json={"code": code, "name": "历史价格测试"}))
+        try:
+            result = await snapshot_service.snapshot_all(target)
+            assert result["historical"] is True, "非今日应自动判定为历史快照"
+
+            payload = unwrap(await client.get("/api/snapshots/day", params={"date": target}))
+            row = next((w for w in payload["watchlist"] if w["code"] == code), None)
+            assert row is not None, "历史日期的自选快照应写入"
+            expect = float(kline.bars[-3].close)
+            assert abs(row["price"] - expect) < 0.01, \
+                f"历史快照应取当日收盘 {expect}，实际 {row['price']}"
+            #: 快照的来源应与日线来源一致（测试跑在 synthetic 模式，故这里不排除它；
+            #: 关键是"取了哪一天的价格"，来源只做一致性核对）
+            assert row["source"] == str(kline.source or ""), \
+                f"快照来源应与日线一致: {row['source']} vs {kline.source}"
+
+            #: 与"今天"的快照不能是同一份数据
+            today = __import__("stock_space.core.util", fromlist=["x"]).today_str()
+            today_snap = await snapshot_service.snapshot_all(today)
+            assert today_snap["historical"] is False
+        finally:
+            from stock_space.store.db import db
+
+            await client.request("DELETE", "/api/watchlist", json={"codes": [code]})
+            with db.transaction() as conn:
+                conn.execute("DELETE FROM watchlist_daily WHERE code=?", (code,))
+                conn.execute("DELETE FROM watch_event WHERE code=?", (code,))
+                conn.execute("DELETE FROM watchlist WHERE code=?", (code,))
+
+    async def test_calendar_bar_on_three_pages(self, client):
+        """日历必须出现在行情中枢、情绪周期、我的持仓三处（用户明确要求）。
+
+        快照只在收盘后写一次，所以日历的下拉必须**只列有数据的交易日** ——
+        否则用户会点到空日期，看到的是一片空白却不知道为什么。
+        """
+        util_js = (await client.get("/assets/util.js")).text
+        assert "function dateBar" in util_js, "缺少可复用的日历条组件"
+        assert "function bindDateBar" in util_js, "缺少日历条事件绑定"
+        assert "db-pick" in util_js, "日历应提供『只列有数据日期』的下拉"
+        assert "captureSnapshot" in util_js, "日历条应能补写快照"
+
+        #: 三个页面都要接上日历
+        for page, marker in (
+            ("/assets/views/market.js", "mktSnap"),
+            ("/assets/views/emotion.js", "emoSnap"),
+            ("/assets/views/watch.js", "snap"),
+        ):
+            source = (await client.get(page)).text
+            assert "util.dateBar" in source, f"{page} 未接入日历条"
+            assert "util.bindDateBar" in source, f"{page} 未绑定日历事件"
+            assert marker in source, f"{page} 缺少日历容器标识 {marker}"
+
+        #: 情绪页不得伪造历史情绪分（该数据未按日留存）
+        emotion = (await client.get("/assets/views/emotion.js")).text
+        assert "不提供历史情绪分" in emotion, "情绪页应明确说明不提供历史情绪分"
+
+        css = (await client.get("/assets/app.css")).text
+        assert ".date-bar" in css, "缺少日历条样式"
+
     async def test_portfolio_lifecycle(self, client, warm_market):
         code = warm_market[3].code
         opened = unwrap(await client.post("/api/portfolio/open", json={

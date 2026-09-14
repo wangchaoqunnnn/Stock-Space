@@ -9,7 +9,7 @@
   var util = SS.util, api = SS.api, charts = SS.charts;
 
   function render(content, ctx) {
-    var state = { reviewKind: 'cn_close', review: null };
+    var state = { reviewKind: 'cn_close', review: null, date: '' };
 
     function shell() {
       return '<div class="page-head"><div class="ph-left"><h1>情绪周期</h1>' +
@@ -19,6 +19,9 @@
         '<button class="btn primary" id="emoReload">刷新</button>' +
         '</div></div>' +
         '<div id="emoTop"></div>' +
+        //: 历史回顾：情绪分本身没有按日留存，因此这里只回放**确有快照**的数据
+        //: （自选池当日表现），并且明确标注"非历史情绪分"，不编造数字。
+        '<div id="emoCalendar"></div>' +
         '<div class="grid cols-2">' +
         '<div class="card"><div class="card-head"><h3>情绪分拆解</h3>' +
         '<span class="ch-sub">加权情绪分 = 各分项贡献之和</span></div><div id="emoParts"></div></div>' +
@@ -45,8 +48,7 @@
 
     function load() {
       var sub = util.$('#emoSub');
-      return api.emotion().then(function (data) {
-        var emotion = data.emotion || {};
+      return api.emotion().then(function (data) {        var emotion = data.emotion || {};
         var cycle = data.cycle || {};
         var metrics = emotion.metrics || {};
         if (sub) {
@@ -71,6 +73,8 @@
             '涨 ' + util.count(metrics.up) + ' / 跌 ' + util.count(metrics.down)) +
           '</div>' +
           util.notice('info', '当前阶段操作建议', util.esc(cycle.advice || '--'));
+
+        paintCalendar();
 
         util.$('#emoParts').innerHTML = '<div class="bar-list">' + (emotion.parts || []).map(function (part) {
           var ratio = part.weight ? part.earned / part.weight : 0;
@@ -158,6 +162,7 @@
           : util.emptyState('暂无涨停样本', '非交易日或涨停池数据源不可用');
 
         state.emotion = data;
+        paintCalendar();
         if (!state.review) return loadReview(state.reviewKind);
         return null;
       }).catch(function (error) {
@@ -165,6 +170,53 @@
           util.esc(error.message) + '<div class="small muted" style="margin-top:6px">' +
           '情绪计算依赖全市场快照与涨停池；若数据源暂时不可用，可到「数据源」页面切换源。</div>');
         return null;
+      });
+    }
+
+    /**
+     * 日历：回看某个交易日的**快照数据**。
+     *
+     * 诚实边界：情绪分（加权情绪分/五阶段）依赖当时全市场快照，并未按日留存，
+     * 所以这里**不会**伪造"历史情绪分"。展示的是当日自选池的涨跌分布 ——
+     * 它是当日市场温度的一个真实切片，且明确标注来源。
+     */
+    function paintCalendar() {
+      var host = util.$('#emoCalendar');
+      if (!host) return Promise.resolve();
+      return api.snapshotDay(state.date || '').then(function (data) {
+        state.date = (data && data.trade_date) || '';
+        var dates = (data && data.available) || [];
+        var watch = (data && data.watchlist) || [];
+        var positions = (data && data.positions) || [];
+        var up = watch.filter(function (w) { return util.toNum(w.change_pct) > 0; }).length;
+        var down = watch.filter(function (w) { return util.toNum(w.change_pct) < 0; }).length;
+        var avg = watch.length
+          ? watch.reduce(function (s, w) { return s + util.toNum(w.change_pct); }, 0) / watch.length
+          : 0;
+
+        host.innerHTML = util.dateBar({
+          id: 'emoSnap', dates: dates, selected: state.date, label: '回看交易日'
+        }) +
+          (watch.length
+            ? '<div class="grid kpi">' +
+              util.kpi('当日自选', util.count(watch.length), '涨 ' + up + ' / 跌 ' + down,
+                up >= down ? 'up' : 'down') +
+              util.kpi('自选平均涨跌', util.pct(avg), '当日切片', avg >= 0 ? 'up' : 'down') +
+              util.kpi('当日持仓', util.count(positions.length), '笔') +
+              util.kpi('快照日期', util.esc(state.date || '--'), '收盘后写入') +
+              '</div>' +
+              util.notice('info', '说明',
+                '情绪分依赖当时全市场快照，未按日留存，因此这里只回放确有快照的' +
+                '自选池表现，不提供历史情绪分。')
+            : util.notice('warn', '该日没有快照',
+                '快照在每个交易日收盘后自动写入；也可到「我的持仓 → 按日回顾」点「补写快照」。'));
+
+        util.bindDateBar(host, 'emoSnap', function (date) {
+          state.date = date;
+          paintCalendar();
+        });
+      }).catch(function (error) {
+        host.innerHTML = util.notice('warn', '快照不可用', util.esc(error.message));
       });
     }
 

@@ -384,6 +384,26 @@ small { font-size: 12px; }
 .range-row { display: flex; align-items: center; gap: 8px; }
 .range-row input[type="range"] { flex: 1 1 auto; accent-color: var(--accent); }
 
+/* ---------------------------------------------------------------- 日历条 */
+/*: 「按日期查看」的控件条。快照只在收盘后写一次，所以下拉里只列**有数据**的交易日，
+   避免用户在空日期上白点。窄屏自动换行。 */
+.date-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; margin-bottom: 12px;
+  background: var(--panel-2); border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+}
+.date-bar .db-label { font-size: 12.5px; color: var(--txt-2); font-weight: 600; }
+.date-bar .db-date { width: 150px; }
+.date-bar .db-pick { max-width: 260px; }
+.date-bar .db-note { margin-left: auto; }
+.date-bar .warn { color: var(--warn); }
+@media (max-width: 720px) {
+  .date-bar { gap: 6px; padding: 8px 10px; }
+  .date-bar .db-pick { max-width: 100%; }
+  .date-bar .db-note { margin-left: 0; width: 100%; }
+}
+
 /* ---------------------------------------------------------------- 表格 */
 .table-wrap { overflow: auto; max-width: 100%; border-radius: var(--radius-sm); }
 /*: ⚠️ 必须显式还原 display: table —— 这是一个真实且范围很大的事故。

@@ -511,6 +511,99 @@
     });
   }
 
+  /**
+   * 渲染"按日期查看"的日历条。
+   *
+   * 设计约束（重要）：日终快照**只在收盘后写一次**（用户明确要求，不做盘中每分钟落库），
+   * 所以不是每个自然日都有数据。因此：
+   *   * 主控件用原生 `<input type="date">` —— 零依赖、移动端体验最好；
+   *   * 旁边再给一个**只列有数据日期**的下拉框，避免用户在空日期上白点；
+   *   * 提供"最新"按钮一键回到最近一个有快照的交易日。
+   *
+   * @param {Object} opts
+   *   id        容器元素 id（用于事件委托定位）
+   *   dates     [{trade_date, watch_codes, positions}] 有数据的日期（倒序）
+   *   selected  当前选中的日期（空=最新）
+   *   label     说明文字
+   * @returns {string} HTML
+   */
+  function dateBar(opts) {
+    opts = opts || {};
+    var dates = opts.dates || [];
+    var selected = opts.selected || '';
+    var known = dates.map(function (d) { return d.trade_date; });
+    var latest = known.length ? known[0] : '';
+    var isLatest = !selected || selected === latest;
+    //: 只要用户选的日期不在"有数据"列表里，就明确提示，而不是默默显示空表
+    var missing = selected && known.indexOf(selected) < 0;
+
+    var options = dates.map(function (d) {
+      return '<option value="' + esc(d.trade_date) + '"' +
+        (d.trade_date === selected ? ' selected' : '') + '>' +
+        esc(d.trade_date) + ' （自选' + count(d.watch_codes) + '/持仓' + count(d.positions) + '）' +
+        '</option>';
+    }).join('');
+
+    return '<div class="date-bar">' +
+      '<span class="db-label">' + esc(opts.label || '查看日期') + '</span>' +
+      '<input type="date" class="input db-date" id="' + esc(opts.id) + 'Date" value="' +
+      esc(selected || latest) + '" max="' + esc(latest) + '">' +
+      (options
+        ? '<select class="input db-pick" id="' + esc(opts.id) + 'Pick">' +
+          '<option value="">— 仅有快照的交易日 —</option>' + options + '</select>'
+        : '<span class="small muted">暂无快照数据</span>') +
+      '<button class="btn sm' + (isLatest ? ' primary' : '') + '" id="' + esc(opts.id) +
+      'Latest">最新</button>' +
+      '<span class="small muted db-note" id="' + esc(opts.id) + 'Note">' +
+      (missing
+        ? '<span class="warn">该日期没有快照</span>'
+        : (latest
+          ? (isLatest ? '显示最近快照 ' + esc(latest) : '历史快照 ' + esc(selected))
+          : '快照将在当日收盘后自动写入')) +
+      '</span>' +
+      '<button class="btn sm" id="' + esc(opts.id) + 'Capture" title="立即写一次当日快照">' +
+      '补写快照</button>' +
+      '</div>';
+  }
+
+  /** 日历条的事件绑定（各视图共用）。返回 true 表示事件已被处理。 */
+  function bindDateBar(root, id, onPick) {
+    var dateEl = root.querySelector('#' + id + 'Date');
+    var pickEl = root.querySelector('#' + id + 'Pick');
+    if (dateEl) {
+      dateEl.addEventListener('change', function () { onPick(dateEl.value); });
+    }
+    if (pickEl) {
+      pickEl.addEventListener('change', function () {
+        if (pickEl.value) onPick(pickEl.value);
+      });
+    }
+    var latestBtn = root.querySelector('#' + id + 'Latest');
+    if (latestBtn) {
+      latestBtn.addEventListener('click', function () { onPick(''); });
+    }
+    var capture = root.querySelector('#' + id + 'Capture');
+    if (capture) {
+      capture.addEventListener('click', function () {
+        capture.disabled = true;
+        capture.textContent = '写入中…';
+        //: 补写"当前正在看的那一天"的快照（留空则由后端按今天写）
+        SS.api.captureSnapshot(dateEl ? (dateEl.value || '') : '').then(function (data) {
+          var w = (data && data.watchlist) || {};
+          var p = (data && data.positions) || {};
+          toast('快照已写入：自选 ' + count(w.written) + ' 只 / 持仓 ' + count(p.written) + ' 笔', 'ok');
+          onPick('');
+        }).catch(function (error) {
+          toast('快照写入失败: ' + error.message, 'error', 6000);
+        }).then(function () {
+          capture.disabled = false;
+          capture.textContent = '补写快照';
+        });
+      });
+    }
+    return true;
+  }
+
   SS.util = {
     $: $, $$: $$, esc: esc, el: el,
     isNum: isNum, toNum: toNum, fixed: fixed, dirClass: dirClass,
@@ -518,7 +611,7 @@
     secs: secs, timeText: timeText, ago: ago, pad: pad,
     kpi: kpi, notice: notice, badge: badge, emptyState: emptyState,
     progress: progress, stackBar: stackBar, barList: barList,
-    pollScanJob: pollScanJob,
+    pollScanJob: pollScanJob, dateBar: dateBar, bindDateBar: bindDateBar,
     sortableTable: sortableTable, toast: toast, modal: modal, closeModal: closeModal,
     confirmDialog: confirmDialog, debounce: debounce, download: download, toCsv: toCsv,
     pick: pick, scoreTone: scoreTone, reasonList: reasonList, kvList: kvList

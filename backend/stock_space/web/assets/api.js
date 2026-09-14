@@ -262,6 +262,19 @@
     addWatch: function (payload) { return post('api/watchlist', payload); },
     addWatchBatch: function (codes) { return post('api/watchlist/batch', { codes: codes }); },
     removeWatch: function (codes) { return del('api/watchlist', { codes: codes }); },
+    /** 历史自选股池：已移出的标的 + 放入/放出事件流水 */
+    watchHistory: function (limit) { return get('api/watchlist/history', { limit: limit || 500 }); },
+
+    /* ---- 日终快照 / 日历 ----
+       快照只在收盘后写一次（用户明确要求，不做盘中每分钟落库），
+       因此"日历能选的日期"必须由后端给出，否则用户会点到没有数据的空日期。 */
+    snapshotDates: function (limit) { return get('api/snapshots/dates', { limit: limit || 90 }); },
+    snapshotDay: function (date) { return get('api/snapshots/day', { date: date || '' }); },
+    captureSnapshot: function (date) {
+      return post('api/snapshots/capture', {},
+        { params: { date: date || '' }, timeout: 180000 });
+    },
+
     portfolio: function (status) { return get('api/portfolio', { status: status || '' }); },
     openPosition: function (payload) { return post('api/portfolio/open', payload); },
     closePosition: function (id, payload) { return post('api/portfolio/' + id + '/close', payload); },
