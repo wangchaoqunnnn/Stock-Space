@@ -20,10 +20,14 @@
 
     function shell() {
       return '<div class="page-head"><div class="ph-left"><h1 id="stkTitle">个股详情</h1>' +
-        '<div class="ph-sub" id="stkSub">输入 6 位代码或在上方搜索</div></div>' +
-        '<div class="page-actions">' +
-        '<input class="input" id="stkCode" placeholder="6 位代码" style="width:120px" value="' +
-        util.esc(state.code) + '" inputmode="numeric">' +
+        '<div class="ph-sub" id="stkSub">支持 6 位代码或名称/名称片段，输入后从下拉候选里选</div></div>' +
+        '<div class="page-actions" style="position:relative">' +
+        //: 原来只有一个"6 位代码"输入框，用户想按名称查只能退回顶部全局搜索。
+        //: 这里做成带候选下拉的检索框（代码 / 名称片段都能查，走 /api/search）。
+        '<input class="input" id="stkCode" placeholder="代码或名称，如 600519 / 茅台" ' +
+        'style="width:210px" autocomplete="off" role="combobox" aria-expanded="false" ' +
+        'aria-controls="stkSuggest" value="' + util.esc(state.code) + '">' +
+        '<div id="stkSuggest" class="search-panel" hidden></div>' +
         '<button class="btn" id="stkLoad">查询</button>' +
         '<button class="btn" id="stkWatch">加入自选</button>' +
         '<button class="btn" id="stkSim">记入模拟持仓</button>' +
@@ -31,37 +35,94 @@
         '<div id="stkBody"></div>';
     }
 
-    function load(code) {
-      var target = code || state.code || (util.$('#stkCode') || {}).value || '';
-      target = String(target).trim();
-      var body = util.$('#stkBody');
-      if (!target) {
-        body.innerHTML = util.emptyState('请输入股票代码',
-          '例如 600519（贵州茅台）、300750（宁德时代）、688981（中芯国际）、920001（北交所）');
-        return Promise.resolve();
-      }
-      state.code = target;
-      body.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>加载 ' +
-        util.esc(target) + ' …</p></div>';
+    // ------------------------------------------------------------ 代码/名称检索
+    /**
+     * 把用户输入解析成 6 位代码。
+     *
+     * 三种输入都要能用：
+     *   1. 6 位代码        → 直接查
+     *   2. 完整/部分名称    → 走 /api/search 取候选，唯一命中则自动进入
+     *   3. 多位候选        → 展示下拉，让用户点选（不猜）
+     */
+    function resolveQuery(text) {
+      var raw = String(text || '').trim();
+      if (!raw) return Promise.resolve(null);
+      if (/^\d{6}$/.test(raw)) return Promise.resolve(raw);
 
-      return Promise.all([
-        api.stock(target),
-        api.kline(target, state.days, state.period)
-      ]).then(function (results) {
-        state.detail = results[0];
-        state.kline = results[1];
-        state.quote = results[0].quote;
-        util.$('#stkSub').textContent = '数据时间 ' + (results[0].as_of || '--') +
-          ' · K线 ' + (state.kline.count || 0) + ' 根（' + (state.kline.origin === 'disk' ? '磁盘缓存' : '实时拉取') + '）' +
-          ' · 源 ' + (state.kline.source || '--');
-        util.$('#stkTitle').textContent = (state.quote && state.quote.name) ?
-          state.quote.name + '（' + state.code + '）' : state.code;
-        paint();
-        return loadEvaluations(target);
+      return api.search(raw, 12).then(function (data) {
+        var items = (data && data.items) || [];
+        if (!items.length) {
+          util.toast('没找到匹配「' + raw + '」的股票，试试 6 位代码', 'error', 5000);
+          return null;
+        }
+        if (items.length === 1) return items[0].code;
+        paintSuggest(items, raw);
+        return null;
       }).catch(function (error) {
-        body.innerHTML = util.notice('bad', '加载失败', util.esc(error.message) +
-          '<div class="small muted" style="margin-top:6px">请确认代码正确（6 位数字），' +
-          '或在「数据源」页面检查 K 线源是否可用。</div>');
+        util.toast('检索失败: ' + error.message, 'error');
+        return null;
+      });
+    }
+
+    function paintSuggest(items, keyword) {
+      var box = util.$('#stkSuggest');
+      var input = util.$('#stkCode');
+      if (!box) return;
+      box.innerHTML = items.map(function (item) {
+        return '<button type="button" class="sp-item" data-code="' + util.esc(item.code) + '">' +
+          '<span><span class="mono">' + util.esc(item.code) + '</span> ' +
+          util.esc(item.name || '--') + '</span>' +
+          '<span class="faint small">' + util.esc(item.board || '') + ' ' +
+          util.pct(item.change_pct) + '</span></button>';
+      }).join('');
+      box.hidden = false;
+      if (input) input.setAttribute('aria-expanded', 'true');
+      util.toast('「' + keyword + '」匹配 ' + items.length + ' 只，请从下拉里选择', 'ok', 4000);
+    }
+
+    function closeSuggest() {
+      var box = util.$('#stkSuggest');
+      var input = util.$('#stkCode');
+      if (box) { box.hidden = true; box.innerHTML = ''; }
+      if (input) input.setAttribute('aria-expanded', 'false');
+    }
+
+
+    function load(code) {
+      var raw = code || state.code || (util.$('#stkCode') || {}).value || '';
+      var body = util.$('#stkBody');
+      return resolveQuery(raw).then(function (target) {
+        if (!target) {
+          if (!String(raw).trim()) {
+            body.innerHTML = util.emptyState('请输入股票代码或名称',
+              '例如 600519 / 茅台（贵州茅台）、300750 / 宁德（宁德时代）、688981（中芯国际）、920001（北交所）');
+          }
+          return null;
+        }
+        closeSuggest();
+        state.code = target;
+        body.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>加载 ' +
+          util.esc(target) + ' …</p></div>';
+
+        return Promise.all([
+          api.stock(target),
+          api.kline(target, state.days, state.period)
+        ]).then(function (results) {
+          state.detail = results[0];
+          state.kline = results[1];
+          state.quote = results[0].quote;
+          util.$('#stkSub').textContent = '数据时间 ' + (results[0].as_of || '--') +
+            ' · K线 ' + (state.kline.count || 0) + ' 根（' + (state.kline.origin === 'disk' ? '磁盘缓存' : '实时拉取') + '）' +
+            ' · 源 ' + (state.kline.source || '--');
+          util.$('#stkTitle').textContent = (state.quote && state.quote.name) ?
+            state.quote.name + '（' + state.code + '）' : state.code;
+          paint();
+          return loadEvaluations(target);
+        }).catch(function (error) {
+          body.innerHTML = util.notice('bad', '加载失败', util.esc(error.message) +
+            '<div class="small muted" style="margin-top:6px">请确认代码/名称正确（6 位数字或名称片段），' +
+            '或在「数据源」页面检查 K 线源是否可用。</div>');
+        });
       });
     }
 
@@ -299,6 +360,17 @@
 
     function bind() {
       content.addEventListener('click', function (event) {
+        //: 候选下拉优先于其它按钮判断
+        var suggest = event.target.closest ? event.target.closest('[data-code]') : null;
+        if (suggest && util.$('#stkSuggest') && util.$('#stkSuggest').contains(suggest)) {
+          var picked = suggest.getAttribute('data-code');
+          var input = util.$('#stkCode');
+          if (input) input.value = picked;
+          closeSuggest();
+          load(picked);
+          return;
+        }
+
         var target = event.target.closest ? event.target.closest('button') : null;
         var periodBtn = event.target.closest ? event.target.closest('[data-period]') : null;
         if (periodBtn) {
@@ -336,8 +408,30 @@
       if (input) {
         input.addEventListener('keydown', function (event) {
           if (event.key === 'Enter') load(input.value);
+          if (event.key === 'Escape') closeSuggest();
+        });
+        //: 边输边给候选（防抖 260ms）—— 名称检索是模糊匹配，
+        //: 让用户看着候选点，比"猜一个最像的"可靠。
+        input.addEventListener('input', function () {
+          var text = input.value.trim();
+          if (text.length < 2 || /^\d{6}$/.test(text)) { closeSuggest(); return; }
+          clearTimeout(state.suggestTimer);
+          state.suggestTimer = setTimeout(function () {
+            api.search(text, 10).then(function (data) {
+              var items = (data && data.items) || [];
+              if (items.length) paintSuggest(items, text); else closeSuggest();
+            }).catch(function () { closeSuggest(); });
+          }, 260);
         });
       }
+      //: 点空白处收起候选
+      document.addEventListener('click', function (event) {
+        var box = util.$('#stkSuggest');
+        if (!box || box.hidden) return;
+        var inside = box.contains(event.target) ||
+          (util.$('#stkCode') && util.$('#stkCode').contains(event.target));
+        if (!inside) closeSuggest();
+      });
     }
 
     content.innerHTML = shell();

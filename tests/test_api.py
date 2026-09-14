@@ -1390,6 +1390,43 @@ class TestFrontendAssets:
         #: 结果字段取自任务对象的 result，而不是任务对象本身
         assert "job.result" in html, "应从 job.result 读取扫描结果"
 
+    async def test_search_by_code_and_name(self, client, warm_market):
+        """个股检索必须同时支持 6 位代码与名称片段。"""
+        sample = warm_market[0]
+        by_code = unwrap(await client.get("/api/search", params={"keyword": sample.code}))
+        assert any(i["code"] == sample.code for i in by_code["items"]), "按代码查不到"
+
+        name = (sample.name or "").strip()
+        if len(name) >= 2:
+            by_name = unwrap(await client.get("/api/search", params={"keyword": name[:2]}))
+            assert by_name["items"], f"按名称片段「{name[:2]}」查不到"
+            assert any(i["code"] == sample.code for i in by_name["items"])
+
+        empty = unwrap(await client.get("/api/search", params={"keyword": "zzzz不存在zzzz"}))
+        assert empty["items"] == []
+
+    async def test_stock_page_supports_name_search(self, client):
+        """个股详情页必须能按名称查，不能只收 6 位代码。
+
+        原先该页只有一个"6 位代码"输入框，想按名称查只能退回顶部全局搜索 ——
+        而现在要求"输入代码 / 名称都能定位个股"。
+        实现要点：唯一命中自动进入，多命中给候选下拉（不猜），
+        边输边给候选（防抖），点选后收起。
+        """
+        js = (await client.get("/assets/views/stock.js")).text
+        assert "resolveQuery" in js, "缺少代码/名称统一解析函数"
+        assert "api.search" in js, "个股页应调用检索接口"
+        assert "placeholder=\"代码或名称" in js, "输入框提示应说明可输名称"
+        assert "paintSuggest" in js and "closeSuggest" in js, "缺少候选下拉的显示/收起"
+        assert "/^\\d{6}$/" in js, "应识别 6 位代码直接查询"
+        assert "items.length === 1" in js, "唯一命中应自动进入"
+        assert "suggestTimer" in js, "边输边查需要防抖"
+
+        #: 候选项目前是 <button>，必须清掉浏览器默认外观，否则与全局搜索下拉样式不一致
+        css = (await client.get("/assets/app.css")).text
+        assert "button.sp-item" in css, "缺 .sp-item 的按钮外观重置"
+        assert "search-panel" in css
+
     async def test_manifest(self, client):
         response = await client.get("/manifest.webmanifest")
         assert response.status_code == 200

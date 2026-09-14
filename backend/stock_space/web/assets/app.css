@@ -197,6 +197,12 @@ small { font-size: 12px; }
 }
 .search-panel .sp-item:last-child { border-bottom: 0; }
 .search-panel .sp-item:hover, .search-panel .sp-item.active { background: var(--panel-2); }
+/*: 候选项目前也用 <button>（键盘可达），需要清掉浏览器默认外观 + .btn 的尺寸，
+   否则行内会带上按钮边框/内边距，和上方全局搜索的下拉样式不一致。 */
+.search-panel button.sp-item {
+  width: 100%; background: none; border: 0; border-bottom: 1px solid var(--line-soft);
+  font: inherit; color: inherit; text-align: left; border-radius: 0;
+}
 .search-panel .sp-empty { padding: 12px; color: var(--muted); }
 
 .topbar-meta { display: flex; align-items: center; gap: 6px; margin-left: auto; }
