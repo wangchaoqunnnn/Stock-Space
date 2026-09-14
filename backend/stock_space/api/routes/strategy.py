@@ -144,6 +144,30 @@ async def last_result(key: str, date: str = "") -> dict[str, Any]:
     return ok(result)
 
 
+@router.get("/strategies/{key}/performance")
+async def strategy_performance(
+    key: str, start: str = Query(""), end: str = Query(""),
+    limit_days: int = Query(60, ge=1, le=365),
+) -> dict[str, Any]:
+    """第6条：回放该策略的历史入选记录，给出胜率/盈亏比与归因。
+
+    出场规则用**策略自己的风控模板**（与回测页同一套 ``_check_exit``），
+    这样"历史胜率"与"回测胜率"口径一致，两个页面不会互相打架。
+    """
+    if get_strategy(key) is None:
+        return fail(f"未知策略: {key}", code=404, status=404)
+    from ...services import performance_service
+
+    try:
+        data = await performance_service.review_scan_history(
+            key, start=start, end=end, limit_days=limit_days,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("历史绩效复盘失败")
+        return fail(f"复盘失败: {exc}", code=500, status=500)
+    return ok(data)
+
+
 @router.post("/strategies/{key}/evaluate")
 async def evaluate_stock(
     key: str,

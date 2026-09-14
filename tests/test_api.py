@@ -1251,6 +1251,141 @@ class TestUserAPI:
         css = (await client.get("/assets/app.css")).text
         assert ".date-bar" in css, "缺少日历条样式"
 
+    async def test_performance_replay_uses_strategy_exit_rules(self, client, warm_market):
+        """第6条：历史绩效回放必须按**策略自己的风控模板**出场。
+
+        为什么这条重要：用"持有 N 天"这种统一口径评估所有策略没有意义 ——
+        策略的收益分布主要由它的止损/止盈结构决定。因此回放复用回测引擎的
+        ``_check_exit``（止损→移动止盈→目标止盈→破线→时间止损），
+        这样"历史胜率"与"回测胜率"口径一致，两个页面不会互相打架。
+        """
+        from stock_space.services import performance_service as perf
+        from stock_space.store.kline_store import kline_store
+
+        strategy = "volume_shrink_rebound"
+        #: 造一笔"过去某日"的扫描：取有足够历史、且之后仍有行情的标的
+        code = None
+        for quote in warm_market[:40]:
+            kline = kline_store.get(quote.code, 400)
+            if kline is None or len(kline.bars) < 80:
+                continue
+            dates = [str(b.date) for b in kline.bars]
+            scan_date = dates[-5]      # 留 4 根后续 bar 供回放
+            if scan_date <= dates[0]:
+                continue
+            code = quote.code
+            break
+        if code is None:
+            return      # 数据不足则跳过
+
+        from stock_space.store.db import db
+
+        payload = '{"strategy":"%s","code":"%s","score":80.0,"reasons":[],"metrics":{}}' % (
+            strategy, code)
+        with db.transaction() as conn:
+            conn.execute("DELETE FROM scan_result WHERE strategy=? AND trade_date=?",
+                         (strategy, scan_date))
+            conn.execute(
+                "INSERT INTO scan_result(strategy, trade_date, code, name, score, rank, "
+                "payload, source, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (strategy, scan_date, code, "", 80.0, 1, payload, "test", 0.0),
+            )
+        try:
+            result = await perf.review_scan_history(strategy, limit_days=120)
+            mine = [t for t in result["trades"] if t["code"] == code]
+            assert mine, (f"未回放出来（scanned={result['scanned']} "
+                          f"no_future={result.get('skipped_no_future_bars')}）")
+            trade = mine[0]
+            #: 入场必须是扫描日**之后**的交易日（扫描在收盘后跑，当天买不进）
+            assert trade["entry_date"] > scan_date, "入场日必须晚于扫描日"
+            assert trade["entry_price"] > 0
+            assert trade["exit_date"] >= trade["entry_date"]
+            assert trade["exit_reason"], "必须给出离场原因"
+            #: 离场原因必须来自策略模板的那几种，而不是随便编一个
+            assert trade["exit_reason"] in (
+                "止损", "移动止盈", "目标止盈", "时间止损", "期末平仓",
+            ) or trade["exit_reason"].startswith("跌破MA"), trade["exit_reason"]
+
+            metrics = result["metrics"]
+            assert 0.0 <= metrics["win_rate"] <= 1.0
+            assert "payoff_ratio" in metrics
+            assert result["attribution"].get("by_exit_reason"), "缺少按离场原因的归因"
+        finally:
+            with db.transaction() as conn:
+                conn.execute("DELETE FROM scan_result WHERE strategy=? AND trade_date=?",
+                             (strategy, scan_date))
+
+    async def test_performance_empty_is_explained_not_zeroed(self, client):
+        """无历史样本时必须说明原因，而不是显示一堆 0 让人误判策略无效。
+
+        扫描历史是**前向积累**的：build_market_context 只认当日快照，无法回填
+        历史扫描。因此刚部署时必然没有可评估样本。
+        """
+        data = unwrap(await client.get("/api/strategies/trend/performance",
+                                       params={"limit_days": 5}, timeout=600000))
+        assert "metrics" in data
+        if not data["trades"]:
+            assert data["metrics"]["win_rate"] == 0.0
+            #: 前端据此显示原因
+            js = (await client.get("/assets/util.js")).text
+            assert "skipped_no_future_bars" in js, "绩效面板应解释样本为空的真实原因"
+            assert "前向积累" in js, "应说明扫描历史只能前向积累"
+
+        #: 未知策略要 404
+        response = await client.get("/api/strategies/nope/performance")
+        assert response.status_code == 404
+
+    async def test_close_position_returns_immediate_review(self, client, warm_market):
+        """第8条：平仓必须**立即**返回这一笔的结算与同策略样本对照。"""
+        code = warm_market[12].code
+        opened = unwrap(await client.post("/api/portfolio/open", json={
+            "code": code, "name": "即时复盘测试", "price": 10.0, "shares": 100,
+            "reason": "即时复盘", "strategy": "trend",
+        }))
+        try:
+            closed = unwrap(await client.post(
+                f"/api/portfolio/{opened['id']}/close", json={"price": 12.0, "reason": "止盈"}))
+            #: (12-10)/10 = +20%
+            assert abs(float(closed["pnl_pct"]) - 20.0) < 0.01, closed["pnl_pct"]
+            review = closed.get("review") or {}
+            assert review.get("found") is True, "平仓响应应带复盘结果"
+            pos = review["position"]
+            assert pos["verdict"] == "盈"
+            assert "context_metrics" in review, "应带同策略历史样本作为对照"
+            assert "suggestions" in review
+
+            #: 单笔复盘接口
+            single = unwrap(await client.get(f"/api/portfolio/{opened['id']}/review"))
+            assert single["found"] is True
+            assert single["position"]["code"] == code
+        finally:
+            await client.request("DELETE", f"/api/portfolio/{opened['id']}")
+
+    async def test_portfolio_performance_endpoint(self, client, warm_market):
+        """第7条：持仓历史绩效接口（已平仓的真实盈亏）。"""
+        code = warm_market[14].code
+        ids = []
+        for price, close in ((10.0, 11.0), (10.0, 9.0)):
+            item = unwrap(await client.post("/api/portfolio/open", json={
+                "code": code, "name": "绩效接口", "price": price, "shares": 100,
+                "reason": "绩效接口测试",
+            }))
+            ids.append(item["id"])
+            unwrap(await client.post(f"/api/portfolio/{item['id']}/close",
+                                     json={"price": close, "reason": "测试"}))
+        try:
+            data = unwrap(await client.get("/api/portfolio/performance"))
+            assert data["closed_count"] >= 2
+            m = data["metrics"]
+            assert m["win_count"] >= 1 and m["loss_count"] >= 1
+            assert 0.0 <= m["win_rate"] <= 1.0
+            assert m["payoff_ratio"] is not None
+            assert data["trades"], "应返回逐笔明细"
+            assert data["attribution"].get("by_hold_days"), "应有归因分桶"
+        finally:
+            for pid in ids:
+                await client.request("DELETE", f"/api/portfolio/{pid}")
+
     async def test_portfolio_lifecycle(self, client, warm_market):
         code = warm_market[3].code
         opened = unwrap(await client.post("/api/portfolio/open", json={

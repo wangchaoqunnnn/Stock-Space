@@ -37,6 +37,7 @@
         '<button class="btn sm" id="scrOnlyPassed">只看入选</button>' +
         '<button class="btn sm" id="scrAll">显示全部</button>' +
         '<label class="switch"><input type="checkbox" id="scrAuto">自动刷新(60s)</label>' +
+        '<div id="scrPerf"></div>' +
         '</div><div id="scrResult"></div></div>';
     }
 
@@ -73,6 +74,7 @@
 
       var resultBox = util.$('#scrResult');
       if (resultBox) resultBox.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>加载最近一次扫描结果…</p></div>';
+      paintPerformance(key);
       return api.lastScan(key).then(function (data) {
         state.items = data.items || [];
         state.lastDate = data.trade_date || '';
@@ -81,6 +83,46 @@
       }).catch(function () {
         state.items = [];
         paintResults();
+      });
+    }
+
+    /**
+     * 第6条：历史绩效（胜率 / 盈亏比 / 归因 / 优化建议）。
+     *
+     * 回放用的是**该策略自己的风控模板**（与回测页同一套 _check_exit），
+     * 因此这里的胜率与回测页口径一致。
+     *
+     * 重要限制：扫描历史是**前向积累**的 —— build_market_context 只认当日快照，
+     * 无法回填历史扫描。所以刚部署时这里必然没有样本，页面会说明原因而不是
+     * 显示一堆 0 让人误判"策略无效"。
+     */
+    function paintPerformance(key) {
+      var box = util.$('#scrPerf');
+      if (!box) return Promise.resolve();
+      box.innerHTML = '<div class="card"><div class="card-head"><h3>历史绩效</h3>' +
+        '<span class="ch-sub" id="scrPerfSub">加载中…</span></div>' +
+        '<div id="scrPerfBody"><div class="boot-placeholder"><div class="spinner"></div>' +
+        '<p>正在按该策略的风控模板回放历史入选…</p>' +
+        '<p class="muted small">首次回放需要补齐日线，可能耗时数十秒</p></div></div></div>';
+
+      return api.strategyPerformance(key, { limitDays: 60 }).then(function (data) {
+        var sub = util.$('#scrPerfSub');
+        if (sub) {
+          sub.textContent = '回放 ' + (data.trades || []).length + ' 笔 / 扫描 ' +
+            util.count(data.scanned || 0) + ' 条记录 · 出场规则按该策略的风控模板';
+        }
+        var body = util.$('#scrPerfBody');
+        if (!body) return;
+        body.innerHTML = util.performancePanel(data, { title: '暂无历史样本' }) +
+          ((data.trades || []).length
+            ? '<h4 style="margin:16px 0 6px">逐笔明细</h4><div id="scrPerfTrades"></div>'
+            : '');
+        util.tradeTable(util.$('#scrPerfTrades'), data.trades || []);
+      }).catch(function (error) {
+        var body = util.$('#scrPerfBody');
+        if (body) {
+          body.innerHTML = util.notice('warn', '历史绩效不可用', util.esc(error.message));
+        }
       });
     }
 

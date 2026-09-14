@@ -155,7 +155,36 @@ async def close_position(position_id: int, payload: dict = Body(...)) -> dict[st
         )
     except ValueError as exc:
         return fail(str(exc), code=400, status=400)
+    #: 第8条：平仓**立即**结算这一笔，并带上同策略历史样本作为对照
+    try:
+        from ...services import performance_service
+
+        item["review"] = performance_service.review_single_position(position_id)
+    except Exception as exc:  # noqa: BLE001 - 复盘失败不应影响平仓本身
+        logger.warning("平仓复盘失败 id=%s: %s", position_id, exc)
+        item["review"] = {"found": False}
     return ok(item, "已平仓")
+
+
+@router.get("/portfolio/performance")
+async def portfolio_performance(
+    strategy: str = Query(""), limit: int = Query(500, ge=1, le=2000),
+) -> dict[str, Any]:
+    """第7条：模拟持仓历史绩效（胜率/盈亏比 + 归因）。"""
+    from ...services import performance_service
+
+    return ok(performance_service.review_positions(strategy=strategy, limit=limit))
+
+
+@router.get("/portfolio/{position_id}/review")
+async def position_review(position_id: int) -> dict[str, Any]:
+    """单笔持仓的复盘（含同策略历史样本对照与优化意见）。"""
+    from ...services import performance_service
+
+    data = performance_service.review_single_position(position_id)
+    if not data.get("found"):
+        return fail(f"持仓不存在: {position_id}", code=404, status=404)
+    return ok(data)
 
 
 @router.delete("/portfolio/{position_id}")

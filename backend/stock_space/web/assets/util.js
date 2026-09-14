@@ -604,6 +604,117 @@
     return true;
   }
 
+  /**
+   * 渲染历史绩效面板（胜率 / 盈亏比 / 归因 / 优化建议）。
+   *
+   * 第6、7、8 条共用同一套展示：口径也共用 —— 回放用的是**策略自己的风控模板**
+   * （与回测页同一套离场逻辑），所以这里的"历史胜率"与回测页的数字含义一致。
+   *
+   * 无样本时明确说明原因，不显示一堆 0 让人误以为"策略无效"。
+   *
+   * @param {Object} data strategyPerformance / portfolioPerformance 的返回
+   * @param {Object} [opts] {emptyHint, title}
+   */
+  function performancePanel(data, opts) {
+    opts = opts || {};
+    data = data || {};
+    var m = data.metrics || {};
+    var trades = data.trades || [];
+
+    if (!trades.length) {
+      var reasons = [];
+      if (data.scanned) reasons.push('已扫描 ' + count(data.scanned) + ' 条记录');
+      if (data.skipped_no_future_bars) {
+        reasons.push(data.skipped_no_future_bars +
+          ' 条因「扫描日就是行情数据的最后一根」而无法评估（扫描在前向积累，之后才可复盘）');
+      }
+      if (data.skipped_no_data) reasons.push(data.skipped_no_data + ' 条取不到日线');
+      return emptyState(opts.title || '暂无历史样本',
+        reasons.length ? reasons.join('；') : (opts.emptyHint || '先执行若干交易日的扫描，之后即可复盘'));
+    }
+
+    var ratio = function (v) { return (v === null || v === undefined || !isFinite(v)) ? '--' : fixed(v, 2); };
+    var cls = function (v) { return toNum(v) >= 0 ? 'up' : 'down'; };
+
+    var html = '<div class="grid kpi">' +
+      kpi('胜率', fixed((m.win_rate || 0) * 100, 1) + '%',
+        m.win_count + ' 胜 / ' + m.loss_count + ' 负',
+        (m.win_rate || 0) >= 0.5 ? 'up' : 'down') +
+      kpi('盈亏比', ratio(m.payoff_ratio), '平均盈 ' + fixed(m.avg_win_pct, 2) + '% / 亏 ' +
+        fixed(m.avg_loss_pct, 2) + '%', (toNum(m.payoff_ratio) || 0) >= 1.5 ? 'up' : 'down') +
+      kpi('期望收益', fixed(m.expectancy_pct, 2) + '%', '每笔平均',
+        toNum(m.expectancy_pct) >= 0 ? 'up' : 'down') +
+      kpi('盈利因子', ratio(m.profit_factor), '总盈 / 总亏',
+        (toNum(m.profit_factor) || 0) >= 1.5 ? 'up' : 'down') +
+      kpi('样本数', count(trades.length), '平均持仓 ' + fixed(m.avg_hold_days, 1) + ' 日') +
+      '</div>';
+
+    //: 归因：哪一类的胜率/盈亏比明显更差 —— 这是"胜率差、盈亏比差的原因"
+    var attr = data.attribution || {};
+    var groups = [
+      ['by_exit_reason', '按离场原因'], ['by_hold_days', '按持有天数'],
+      ['by_score', '按入选评分'], ['by_board', '按板块'], ['by_entry_month', '按建仓月份']
+    ];
+    var tables = groups.map(function (pair) {
+      var rows = attr[pair[0]] || [];
+      if (!rows.length) return '';
+      return '<h4 style="margin:14px 0 6px">' + esc(pair[1]) + '</h4>' +
+        '<div class="table-wrap"><table class="grid compact"><thead><tr>' +
+        '<th>分组</th><th class="n">笔数</th><th class="n">胜率</th>' +
+        '<th class="n">盈亏比</th><th class="n">均值</th><th class="n">累计</th>' +
+        '</tr></thead><tbody>' + rows.map(function (r) {
+          return '<tr><td>' + esc(r.label) + '</td>' +
+            '<td class="n">' + count(r.count) + '</td>' +
+            '<td class="n">' + fixed(r.win_rate * 100, 0) + '%</td>' +
+            '<td class="n">' + ratio(r.payoff_ratio) + '</td>' +
+            '<td class="n ' + cls(r.avg_pnl_pct) + '">' + fixed(r.avg_pnl_pct, 2) + '%</td>' +
+            '<td class="n ' + cls(r.pnl_sum) + '">' + fixed(r.pnl_sum, 1) + '%</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }).filter(Boolean).join('');
+
+    var suggestions = (data.suggestions || []).map(function (s) {
+      var tone = s.level === 'high' ? 'bad' : (s.level === 'medium' ? 'warn' : 'ok');
+      return notice(tone, s.title, esc(s.detail));
+    }).join('');
+
+    if (suggestions) {
+      html += '<h4 style="margin:16px 0 6px">系统优化建议</h4>' + suggestions;
+    }
+    if (tables) {
+      html += '<h4 style="margin:16px 0 6px">差异归因</h4>' + tables;
+    }
+    return html;
+  }
+
+  /** 逐笔明细表（绩效面板下方）。 */
+  function tradeTable(container, trades) {
+    if (!container) return;
+    sortableTable(container, [
+      { label: '代码', key: 'code' }, { label: '名称', key: 'name' },
+      { label: '入场日', key: 'entry_date' },
+      { label: '入场价', num: true, sort: function (i) { return i.entry_price; } },
+      { label: '离场日', key: 'exit_date' },
+      { label: '离场价', num: true, sort: function (i) { return i.exit_price; } },
+      { label: '离场原因', key: 'exit_reason' },
+      { label: '收益', num: true, sort: function (i) { return i.pnl_pct; } },
+      { label: '持有', num: true, sort: function (i) { return i.hold_days; } },
+      { label: '评分', num: true, sort: function (i) { return i.score; } }
+    ], trades, function (item) {
+      return [
+        '<span class="mono">' + esc(item.code) + '</span>',
+        esc(item.name || '--'),
+        '<span class="small muted">' + esc(item.entry_date) + '</span>',
+        num(item.entry_price, 2),
+        '<span class="small muted">' + esc(item.exit_date) + '</span>',
+        num(item.exit_price, 2),
+        '<span class="small muted">' + esc(item.exit_reason || '--') + '</span>',
+        '<span class="' + dirClass(item.pnl_pct) + '">' + pct(item.pnl_pct) + '</span>',
+        item.hold_days + ' 天',
+        item.score ? fixed(item.score, 1) : '--'
+      ];
+    }, { initialSort: 7, initialAsc: false });
+  }
+
   SS.util = {
     $: $, $$: $$, esc: esc, el: el,
     isNum: isNum, toNum: toNum, fixed: fixed, dirClass: dirClass,
@@ -612,6 +723,7 @@
     kpi: kpi, notice: notice, badge: badge, emptyState: emptyState,
     progress: progress, stackBar: stackBar, barList: barList,
     pollScanJob: pollScanJob, dateBar: dateBar, bindDateBar: bindDateBar,
+    performancePanel: performancePanel, tradeTable: tradeTable,
     sortableTable: sortableTable, toast: toast, modal: modal, closeModal: closeModal,
     confirmDialog: confirmDialog, debounce: debounce, download: download, toCsv: toCsv,
     pick: pick, scoreTone: scoreTone, reasonList: reasonList, kvList: kvList

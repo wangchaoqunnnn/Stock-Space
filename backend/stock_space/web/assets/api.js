@@ -265,6 +265,19 @@
     /** 历史自选股池：已移出的标的 + 放入/放出事件流水 */
     watchHistory: function (limit) { return get('api/watchlist/history', { limit: limit || 500 }); },
 
+    /* ---- 历史绩效（第6/7/8条）---- */
+    strategyPerformance: function (key, opts) {
+      opts = opts || {};
+      return get('api/strategies/' + encodeURIComponent(key) + '/performance', {
+        start: opts.start || '', end: opts.end || '', limit_days: opts.limitDays || 60
+      }, { timeout: 600000 });
+    },
+    portfolioPerformance: function (opts) {
+      opts = opts || {};
+      return get('api/portfolio/performance', { strategy: opts.strategy || '', limit: opts.limit || 500 });
+    },
+    positionReview: function (id) { return get('api/portfolio/' + id + '/review'); },
+
     /* ---- 日终快照 / 日历 ----
        快照只在收盘后写一次（用户明确要求，不做盘中每分钟落库），
        因此"日历能选的日期"必须由后端给出，否则用户会点到没有数据的空日期。 */

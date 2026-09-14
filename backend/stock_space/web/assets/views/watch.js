@@ -27,6 +27,7 @@
       var TABS = [
         { key: 'watch', label: '自选股池' },
         { key: 'portfolio', label: '模拟持仓' },
+        { key: 'perf', label: '绩效复盘' },
         { key: 'history', label: '历史自选池' },
         { key: 'snapshot', label: '按日回顾' }
       ];
@@ -132,6 +133,7 @@
             if (state.tab === 'watch') paintWatch(body, watch, byCode, quotes);
             else if (state.tab === 'history') paintHistory(body);
             else if (state.tab === 'snapshot') paintSnapshot(body);
+            else if (state.tab === 'perf') paintPerformance(body);
             else paintPortfolio(body, enriched);
           });
         }).catch(function (error) {
@@ -487,6 +489,66 @@
         });
       }
 
+      // ------------------------------------------------------------ 绩效复盘
+      /**
+       * 第7条：模拟持仓的历史胜率/盈亏比 + 归因 + 优化建议。
+       *
+       * 数据来源是**已平仓记录的真实盈亏**（不是模拟回放）—— 这是真金白银的
+       * 纸面结果，比策略回放更有说服力。样本不足时如实说明。
+       */
+      function paintPerformance(body) {
+        body.innerHTML = '<div class="boot-placeholder"><div class="spinner"></div><p>结算历史持仓…</p></div>';
+        return api.portfolioPerformance({ limit: 500 }).then(function (data) {
+          var trades = (data && data.trades) || [];
+          var html = '<div class="card"><div class="card-head"><h3>持仓绩效复盘</h3>' +
+            '<span class="ch-sub">基于已平仓记录的**实际**盈亏，非模拟回放</span></div>' +
+            util.performancePanel(data, {
+              title: '还没有平仓记录',
+              emptyHint: '在「模拟持仓」里平仓后，这里会立即统计胜率与盈亏比'
+            }) +
+            (trades.length
+              ? '<h4 style="margin:16px 0 6px">逐笔明细</h4><div id="perfTrades"></div>'
+              : '') +
+            '</div>';
+          body.innerHTML = html;
+          util.tradeTable(util.$('#perfTrades'), trades);
+        }).catch(function (error) {
+          body.innerHTML = util.notice('bad', '绩效复盘不可用', util.esc(error.message));
+        });
+      }
+
+      /**
+       * 第8条：平仓后的即时复盘弹窗。
+       *
+       * 单笔谈"胜率"没有意义，因此这里把**同策略的历史样本**一并摆出来做对照 ——
+       * 用户能立刻知道"这一笔是运气还是符合预期"。
+       */
+      function showCloseReview(review) {
+        var pos = (review && review.position) || {};
+        if (!pos.code) return;
+        var m = (review && review.context_metrics) || {};
+        var body = util.kvList([
+          ['代码 / 名称', pos.code + ' ' + (pos.name || '')],
+          ['本笔结果', (pos.verdict || '--') + ' ' + util.pct(pos.pnl_pct)],
+          ['建仓 → 平仓', util.num(pos.entry_price, 2) + ' → ' + util.num(pos.close_price, 2)],
+          ['持有天数', (pos.hold_days || 0) + ' 天'],
+          ['时间', (pos.opened_at_text || '--') + ' ~ ' + (pos.closed_at_text || '--')],
+          ['同策略样本', (review.strategy_sample || 0) + ' 笔已平仓'],
+          ['该策略胜率', util.fixed((m.win_rate || 0) * 100, 1) + '%'],
+          ['该策略盈亏比', m.payoff_ratio === null || m.payoff_ratio === undefined
+            ? '--' : util.fixed(m.payoff_ratio, 2)]
+        ]);
+        var advice = (review.suggestions || []).map(function (s) {
+          var tone = s.level === 'high' ? 'bad' : (s.level === 'medium' ? 'warn' : 'ok');
+          return util.notice(tone, s.title, util.esc(s.detail));
+        }).join('');
+        util.modal('平仓结算 · ' + pos.code,
+          body + (advice
+            ? '<h4 style="margin:14px 0 6px">系统优化意见</h4>' + advice
+            : '<p class="small muted">同策略样本还太少，累积若干笔后这里会给出优化意见。</p>'),
+          [util.el('button', { class: 'btn primary', text: '知道了', onclick: util.closeModal })]);
+      }
+
       // ------------------------------------------------------------ 交互
       function openStock(item) {
         if (item && item.code) SS.app.navigate('#/stock?code=' + item.code);
@@ -524,9 +586,15 @@
                 api.closePosition(id, {
                   price: price,
                   reason: (util.$('#closeReason') || {}).value || ''
-                }).then(function () {
+                }).then(function (data) {
                   util.closeModal();
-                  util.toast('已平仓', 'ok');
+                  //: 第8条：平仓后**立即**结算这一笔，并给出同策略样本对照
+                  var review = (data && data.review) || {};
+                  var pos = review.position || {};
+                  var verdict = pos.verdict || (util.toNum(data.pnl_pct) >= 0 ? '盈' : '亏');
+                  util.toast('已平仓 · 本笔' + verdict + ' ' + util.pct(data.pnl_pct) +
+                    '（持 ' + (pos.hold_days || 0) + ' 天）', 'ok', 7000);
+                  showCloseReview(review);
                   return paint();
                 }).catch(function (e) { util.toast('平仓失败: ' + e.message, 'error'); });
               }
