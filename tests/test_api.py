@@ -1320,6 +1320,56 @@ class TestFrontendAssets:
         js = (await client.get("/assets/util.js")).text
         assert "ratio > 0" in js, "util.progress 应跳过 0 值的填充元素"
 
+    async def test_demo_kline_never_enters_disk_cache(self, monkeypatch):
+        """合成(演示)日线绝不能写入共享磁盘缓存 —— 这是"假K线"事件的根因。
+
+        真实事故：以 synthetic 模式跑过之后，320 只股票的假K线被 UPSERT 进
+        `kline_daily` 并长期留存；之后 auto 模式下 `_read_disk()` 命中这些行，
+        **不看 source 就直接当真实数据返回**。用户看到的现象是"分众传媒(真实价 4.74)
+        配 621 元的K线"，均线/技术指标/止损价全部基于假序列计算。
+
+        磁盘缓存是跨进程、跨模式共享的，混入演示数据等于永久污染。
+        这里锁定两道闸：put() 防新增、_read_disk() 防既有。
+        """
+        from stock_space.config import Config, config
+        from stock_space.models import Bar, KLine
+        from stock_space.store.db import db
+        from stock_space.store.kline_store import SYNTHETIC_SOURCE, kline_store
+
+        #: 测试套件跑在 synthetic 模式（避免联网），而这两道闸正是"非演示模式"下才生效。
+        #: 用 monkeypatch 把模式属性改成 False 来触发受测分支，结束后自动还原。
+        monkeypatch.setattr(Config, "synthetic_allowed", property(lambda self: False))
+        assert not config().synthetic_allowed
+        db.init()   # 该用例直接读写表，需确保已建表（夹具通常已建，这里兜底）
+        #: 缓存是会话级共享的，先清空以免读到别的用例留下的条目
+        kline_store.cache.clear()
+
+        fake = KLine(code="002027", period="day", source=SYNTHETIC_SOURCE, bars=[
+            Bar(date="2026-09-14", open=620.0, high=624.0, low=613.0, close=621.82, volume=1e6),
+        ])
+        assert kline_store.put(fake, source=SYNTHETIC_SOURCE) == 0, \
+            "演示K线不应被写盘（put 应返回 0）"
+        assert kline_store.get("002027", 260) is None, "写盘被拒后不应能读到"
+
+        #: 第二道闸：库里**已经**有假数据时（历史遗留），读也必须拒绝
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO kline_daily(code, trade_date, open, high, low, close, volume, "
+                "amount, change_pct, turnover_rate, adj, source, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code, trade_date) DO UPDATE SET "
+                "close=excluded.close, source=excluded.source",
+                ("999999", "2026-09-14", 620.0, 624.0, 613.0, 621.82,
+                 1e6, 0.0, 0.0, 0.0, "qfq", SYNTHETIC_SOURCE, 0.0),
+            )
+        kline_store.cache.clear()
+        try:
+            assert kline_store.get("999999", 260) is None, \
+                "库里已有的演示K线也必须被拒绝返回（否则假数据会重新露头）"
+        finally:
+            with db.transaction() as conn:
+                conn.execute("DELETE FROM kline_daily WHERE code=?", ("999999",))
+            kline_store.cache.clear()
+
     async def test_no_absolute_urls_in_html(self, client):
         html = (await client.get("/")).text
         # 页面不得引用任何外部域名(CDN)

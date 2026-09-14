@@ -22,6 +22,7 @@ from typing import Any, Iterable, Sequence
 from ..core.cache import BoundedTTLCache
 from ..core.memory import memory_guard
 from ..core.util import today_str
+from ..config import config
 from ..models import Bar, KLine
 from .db import db
 
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 #: 同一交易日内不重复向网络请求同一只股票的日线
 FETCH_FRESH_SECONDS = 6 * 3600
+
+#: 合成(演示)数据的来源标记 —— 见 KLineStore._reject_demo()
+SYNTHETIC_SOURCE = "synthetic"
 
 
 class KLineStore:
@@ -71,6 +75,19 @@ class KLineStore:
             return None
         if not rows:
             return None
+        #: 第二道闸：即使库里已经存在演示数据(历史遗留)，非演示模式也不得把它当真实数据。
+        #: 两道闸是互补的 —— put() 防新增，这里防既有；缺任何一个都会让假K线重新露头。
+        disk_source = str(rows[0]["source"] or "disk")
+        if self._is_demo(disk_source) and not config().synthetic_allowed:
+            marker = f"demo-serve:{code}"
+            if marker not in self._warned:
+                self._warned.add(marker)
+                logger.warning(
+                    "跳过磁盘缓存中的合成K线: %s (source=%s) —— 改走真实数据源；"
+                    "如确认无用可执行 kline_store.clear(code=%r) 清除",
+                    code, disk_source, code,
+                )
+            return None
         bars = [
             Bar(
                 date=str(row["trade_date"]),
@@ -85,7 +102,7 @@ class KLineStore:
             )
             for row in reversed(rows)
         ]
-        return KLine(code=code, period="day", bars=bars, source=str(rows[0]["source"] or "disk"))
+        return KLine(code=code, period="day", bars=bars, source=disk_source)
 
     def has_fresh(self, code: str) -> bool:
         """当日是否已成功抓取过(用于跳过网络请求)。"""
@@ -105,14 +122,31 @@ class KLineStore:
         return last_date >= today_str() or time.time() - fetched_at < 1800
 
     # ------------------------------ 写 ------------------------------
+    def _is_demo(self, source: str) -> bool:
+        return str(source or "").strip().lower().startswith(SYNTHETIC_SOURCE)
+
     def put(self, kline: KLine, *, source: str = "") -> int:
         if not kline or not kline.bars:
+            return 0
+        origin = source or kline.source or ""
+        #: ⚠️ 演示(合成)数据绝不写入共享磁盘缓存 —— 除非整个服务就运行在演示模式。
+        #:
+        #: 真实事故：某次以 synthetic 模式跑过之后，320 只股票的假K线被 UPSERT 进
+        #: `kline_daily` 并长期留存；之后 auto/real 模式下 `_read_disk()` 命中这些行，
+        #: **不看 source 就直接当真实数据返回** —— 于是个股页出现"分众传媒(真实价 4.74)
+        #: 配 621 元的假K线"，均线/技术指标/止损价全部基于假序列计算。
+        #: 磁盘缓存是"跨进程、跨模式"共享的，混入演示数据等于永久污染。
+        if self._is_demo(origin) and not config().synthetic_allowed:
+            logger.warning(
+                "拒绝把合成K线写入磁盘缓存: %s (source=%s) —— 演示数据不得污染真实缓存",
+                kline.code, origin,
+            )
             return 0
         rows = [
             (
                 kline.code, bar.date, bar.open, bar.high, bar.low, bar.close,
                 bar.volume, bar.amount, bar.change_pct, bar.turnover_rate,
-                "qfq", source or kline.source or "", time.time(),
+                "qfq", origin, time.time(),
             )
             for bar in kline.bars
         ]
@@ -135,7 +169,7 @@ class KLineStore:
                     "fetched_at=excluded.fetched_at, source=excluded.source, "
                     "bars=excluded.bars, last_date=excluded.last_date",
                     (
-                        kline.code, time.time(), source or kline.source or "",
+                        kline.code, time.time(), origin,
                         len(kline.bars), kline.bars[-1].date,
                     ),
                 )
@@ -294,4 +328,4 @@ def aggregate_bars(bars: Sequence[Bar], period: str) -> list[Bar]:
     return out
 
 
-__all__ = ["KLineStore", "kline_store", "aggregate_bars"]
+__all__ = ["KLineStore", "kline_store", "aggregate_bars", "SYNTHETIC_SOURCE"]
