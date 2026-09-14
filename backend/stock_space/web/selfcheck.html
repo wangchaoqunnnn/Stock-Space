@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>部署自检 · StockSpace</title>
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="assets/app.css">
+<link rel="stylesheet" href="assets/app.css?v={{ASSET_VERSION}}">
 </head>
 <body>
 <div class="content" style="max-width:1100px;margin:0 auto">
@@ -39,8 +39,8 @@
   </p>
 </div>
 
-<script src="assets/util.js"></script>
-<script src="assets/api.js"></script>
+<script src="assets/util.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/api.js?v={{ASSET_VERSION}}"></script>
 <script>
 (function () {
   'use strict';
@@ -257,13 +257,25 @@
       } else {
         record('策略参数', 'ok', '全部策略均可调参');
       }
-      return items.length ? api.scan(items[0].key, { limit: 5, persist: false, timeout: 300000 }) : null;
-    }).then(function (scan) {
-      if (!scan) return;
-      record('策略扫描', scan.total_evaluated > 0 ? 'ok' : 'warn',
-        scan.strategy + '：评估 ' + scan.total_evaluated + ' 只，入选 ' + scan.passed_count +
-        '，耗时 ' + (scan.duration_ms / 1000).toFixed(1) + 's',
-        scan.total_evaluated > 0 ? '' : '没有标的被评估：通常是日线数据不足，检查日线源。');
+      if (!items.length) return null;
+      //: 扫描已改为**异步任务 + 轮询**（同步接口曾因单策略 158 秒被代理超时掐断，
+      //: 前端只能报"无法连接到后端服务"）。自检页原先还在调旧的同步 api.scan()，
+      //: 而它现在返回 {job:{...}} —— 于是 scan.total_evaluated 是 undefined，
+      //: 这一项**永远不输出**（用户看到的"自检报错"）。
+      return api.createScanJob(items[0].key, { limit: 5 })
+        .then(function (created) {
+          var job = (created && created.job) || {};
+          if (!job.id) throw new Error('后端未返回任务 ID');
+          return util.pollScanJob(job.id, { interval: 2000, timeout: 10 * 60 * 1000 });
+        });
+    }).then(function (job) {
+      if (!job) return;
+      var scan = job.result || {};
+      var evaluated = scan.total_evaluated || 0;
+      record('策略扫描', evaluated > 0 ? 'ok' : 'warn',
+        scan.strategy + '：评估 ' + util.count(evaluated) + ' 只，入选 ' +
+        util.count(scan.passed_count) + '，耗时 ' + util.secs(job.elapsed_seconds),
+        evaluated > 0 ? '' : '没有标的被评估：通常是日线数据不足，检查日线源。');
       var fetcher = scan.fetcher || {};
       if (fetcher.budget && fetcher.used >= fetcher.budget) {
         record('日线请求配额', 'warn', '本轮已用满 ' + fetcher.budget + ' 次请求',

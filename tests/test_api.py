@@ -1351,6 +1351,45 @@ class TestFrontendAssets:
         assert response.status_code == 200
         assert "部署自检" in response.text
 
+    async def test_selfcheck_assets_are_versioned(self, client):
+        """部署自检页的资源必须带版本号，且不得被缓存。
+
+        真实事故（用户报"部署自检页面点击报错"）：
+        `/selfcheck` 原先直接 `FileResponse` 返回原始 HTML，**绕过了首页那套
+        `{{ASSET_VERSION}}` 注入**，于是页面里的 `assets/util.js` / `api.js`
+        是**无版本号 URL**；而平台其它页面都是 `?v=<启动时间>`。
+        浏览器拿旧缓存脚本配新后端 → 一点就报错，且硬刷新也未必修好
+        （无版本号的 URL 没有任何缓存失效依据）。
+        """
+        response = await client.get("/selfcheck")
+        html = response.text
+        assert "{{ASSET_VERSION}}" not in html, "占位符未被注入（自检页又绕过了 _render_index）"
+
+        for asset in ("assets/util.js", "assets/api.js", "assets/app.css"):
+            match = re.search(re.escape(asset) + r"\?v=(\d+)", html)
+            assert match, f"{asset} 缺少版本号 —— 会导致浏览器用到旧缓存脚本"
+            assert int(match.group(1)) > 0
+
+        cache = response.headers.get("cache-control", "")
+        assert "no-store" in cache, f"自检页必须禁缓存，实际: {cache}"
+
+    async def test_selfcheck_scans_through_async_job(self, client):
+        """自检页的策略扫描必须走异步任务接口。
+
+        踩过的坑：扫描改成异步任务后，自检页仍在调旧的同步 `api.scan()`，
+        而它现在返回 `{job:{...}}` —— `scan.total_evaluated` 恒为 undefined，
+        且 `if (!scan) return` 拦不住对象，**「策略扫描」这一项永远不输出**，
+        用户看到的就是"自检页有问题"。
+        """
+        html = (await client.get("/selfcheck")).text
+        assert "createScanJob" in html, "自检页应使用异步任务接口创建扫描"
+        assert "pollScanJob" in html, "自检页应轮询任务进度"
+        #: 只检查"真的调用"，避免命中注释里对旧写法的说明
+        assert not re.search(r"api\.scan\s*\(\s*items", html), \
+            "自检页不应再调用已改签名的同步 api.scan()"
+        #: 结果字段取自任务对象的 result，而不是任务对象本身
+        assert "job.result" in html, "应从 job.result 读取扫描结果"
+
     async def test_manifest(self, client):
         response = await client.get("/manifest.webmanifest")
         assert response.status_code == 200

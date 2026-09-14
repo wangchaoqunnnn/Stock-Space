@@ -287,13 +287,26 @@ def _mount_frontend(app: FastAPI) -> None:
 
     @app.get("/selfcheck", include_in_schema=False)
     async def selfcheck_page() -> Any:
-        """部署自检页 —— 逐项检查数据源、数据库、内存、调度与推送配置。"""
+        """部署自检页 —— 逐项检查数据源、数据库、内存、调度与推送配置。
+
+        ⚠️ 这里必须和首页一样走 ``_render_index()`` 注入 ``{{ASSET_VERSION}}``。
+        踩过的坑：原先直接用 ``FileResponse`` 返回原始文件，页面里的
+        ``assets/util.js`` / ``api.js`` **没有版本号** —— 而平台其它页面都带
+        ``?v=``。结果是浏览器拿旧缓存里的脚本去配新后端，用户一进自检页就报错，
+        且"硬刷新"也未必修好（无版本号的 URL 没有任何缓存失效依据）。
+        """
         file = WEB_DIR / "selfcheck.html"
         if not file.exists():
             return JSONResponse(status_code=404, content={"message": "自检页不存在"})
-        return FileResponse(
-            file, media_type="text/html; charset=utf-8",
-            headers={"Cache-Control": "no-cache"},
+        html = _render_index(file.read_text(encoding="utf-8"))
+        return Response(
+            content=html,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
         )
 
 
