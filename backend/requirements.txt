@@ -1,0 +1,22 @@
+# StockSpace 统一股票决策平台 —— 运行依赖
+# 全部为公开 PyPI 包, 版本下界保守, 便于在云服务器上稳定解析。
+# 可选增强见 requirements-optional.txt。
+
+# --- Web 框架 ---
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+# --- HTTP 与序列化 ---
+httpx[http2]>=0.27
+orjson>=3.9
+
+# --- 数值计算 (策略引擎) ---
+numpy>=1.26
+pandas>=2.1
+
+# --- 进程内存监控 (缺失时自动降级到标准库实现, 不影响运行) ---
+psutil>=5.9
+
+# --- 配置解析: Python 3.11+ 自带 tomllib, 3.10 用 tomli 兜底 ---
+tomli>=2.0; python_version < "3.11"

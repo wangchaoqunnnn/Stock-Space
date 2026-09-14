@@ -1,0 +1,13 @@
+# 可选数据源依赖
+# 用途: 让平台多出 AKShare、Ashare(腾讯自选股 A 股) 两条取数通道。
+# 未安装时平台仍可正常运行 —— 对应数据源在「数据源」页面显示为「未安装」, 不参与调度。
+#
+#   python -m pip install -r requirements-optional.txt
+
+akshare>=1.12.0
+Ashare>=0.1.0
+psutil>=5.9
+
+# 其它数据源登录态所需的解析辅助 (可选)
+lxml>=5.0
+beautifulsoup4>=4.12

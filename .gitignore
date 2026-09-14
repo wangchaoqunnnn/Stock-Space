@@ -1,0 +1,44 @@
+# ---- 运行期数据（绝不入库）----
+data/
+logs/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# 用户私有配置（含凭据/Webhook）
+.env
+config/app.local.toml
+config/sources.local.toml
+config/secrets.toml
+**/cookies.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage*
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 发布产物 ----
+dist/
+build/
+*.tar
+*.tar.gz
+*.zip
+
+# ---- 诊断输出（本地排查用，不入库）----
+*.dbg.out
+docs/reference/private/

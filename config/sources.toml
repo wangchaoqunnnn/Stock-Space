@@ -1,0 +1,249 @@
+# =============================================================================
+# StockSpace 数据源目录（唯一允许出现第三方地址的文件）
+# =============================================================================
+# 设计原则：代码里不出现任何上游域名，全部收敛到本文件；
+# 运行期可通过 config/sources.local.toml 或环境变量 SS_SOURCES__...__URLS 覆盖，
+# 也可以在网页「数据源」页面手工输入新地址（写入 data/runtime_settings.json）。
+#
+# urls 为“候选地址列表”：同一能力下第一个失败会自动尝试下一个，因此
+# 单一入口被封禁不会导致能力整体不可用（要求：不得引用固定地址）。
+#
+# ⚠️ 入网环境差异实测（2026-09，本机）：
+#   * push2.eastmoney.com / push2his.eastmoney.com 在部分网络被 TLS 层阻断
+#     （RemoteDisconnected），而 **push2delay.eastmoney.com 镜像可达**；
+#   * 腾讯 web.ifzq.gtimg.cn 的 fqkline 入口返回 HTTP 501，
+#     而 **proxy.finance.qq.com/ifzqgtimg/.../newfqkline 与 ifzq.gtimg.cn 可达**；
+#   * 新浪列表接口高频访问会返回 HTTP 456（封禁约 10 分钟），实时行情不受影响；
+#   * 网易行情域名在本机 DNS 解析失败，故未纳入；
+#   * 东财 K 线在 delay 镜像上返回空 klines，故不作为 K 线主源。
+#   因此候选列表**顺序即容灾优先级**：把实测可达的入口排在前面。
+# =============================================================================
+
+[providers.eastmoney]
+label = "东方财富"
+priority = 90
+enabled = true
+requires_login = false
+homepage = "https://quote.eastmoney.com/"
+note = "A股快照/榜单/板块/资金流/涨停池覆盖最全的主源；主域名在部分网络不可达时自动走 delay 镜像。"
+
+[providers.eastmoney.urls]
+# 全市场分页快照（沪深京 A 股）。delay 镜像优先，主域名作为备选。
+snapshot = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+# 单只行情 / 指数 / 批量行情
+quote = [
+  "https://push2delay.eastmoney.com/api/qt/stock/get",
+  "https://push2.eastmoney.com/api/qt/stock/get",
+]
+# 批量行情走 ulist.np（一次最多 80 个 secid）
+batch_quote = [
+  "https://push2delay.eastmoney.com/api/qt/ulist.np/get",
+  "https://push2.eastmoney.com/api/qt/ulist.np/get",
+]
+# 榜单（涨跌幅/成交额/换手率/涨速）
+rank = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+# 日/周/月 K 线。⚠️ 实测本机 push2his / push2 域名被 TLS 层阻断, 而 delay 镜像
+# 虽然可达但 klines 恒为空数组 → 东财在本环境下**取不到 K 线**, 因此放在最后。
+# 真正扛 K 线的是腾讯(newfqkline)、新浪(money)与同花顺(按年打包)。
+kline = [
+  "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+  "https://push2.eastmoney.com/api/qt/stock/kline/get",
+]
+# 分时
+minute = [
+  "https://push2his.eastmoney.com/api/qt/stock/trends2/get",
+  "https://push2delay.eastmoney.com/api/qt/stock/trends2/get",
+]
+# 板块列表 / 板块成分股
+sector = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+sector_members = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+# 个股资金流
+money_flow = [
+  "https://push2delay.eastmoney.com/api/qt/stock/fflow/kline/get",
+  "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get",
+]
+# 板块资金流排名
+sector_flow = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+# 涨停/跌停/炸板池（push2ex 实测可达）
+limit_up_pool = ["https://push2ex.eastmoney.com/getTopicZTPool"]
+broken_pool = ["https://push2ex.eastmoney.com/getTopicZBPool"]
+# 沪深京 A 股代码表
+code_list = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+# 股票检索（代码/名称模糊搜索）
+search = ["https://searchapi.eastmoney.com/api/suggest/get"]
+# 市场宽度（涨跌家数）
+breadth = [
+  "https://push2delay.eastmoney.com/api/qt/clist/get",
+  "https://push2.eastmoney.com/api/qt/clist/get",
+]
+# 人气榜（关注度代理指标）
+attention = ["https://emappdata.eastmoney.com/stockrank/getAllCurrentList"]
+# 财报业绩报表
+finance = ["https://datacenter-web.eastmoney.com/api/data/v1/get"]
+
+[providers.sina]
+label = "新浪财经"
+priority = 80
+enabled = true
+requires_login = false
+homepage = "https://finance.sina.com.cn/"
+note = "实时行情稳定；全市场列表最完整但高频会被 456 限流（约 10 分钟），日K接口可用。"
+
+[providers.sina.urls]
+snapshot = [
+  "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData",
+]
+quote = ["https://hq.sinajs.cn/list="]
+# 日K：money 与 quotes.sina.cn 两个等价入口互为备份（实测均可用）
+kline = [
+  "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData",
+  "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData",
+]
+minute = ["https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData"]
+sector = ["https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"]
+sector_members = ["https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"]
+code_list = ["https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"]
+# 个股资金流（来源：92KeBi `real/moneyflow.py`）。
+# 这是 money_flow 能力**唯一非东财的源** —— 此前该能力只有 eastmoney 一个候选，
+# 东财一旦被阻断就完全没有兜底，与"多源容灾"的要求不符。
+# 实测(2026-09)：HTTP 200 + 4000+ 条日度记录。
+# ⚠️ 口径差异：本接口**只有日度数据**（最新一条通常是上一交易日，盘后更新），
+# 而东财 push2 fflow 是盘中实时；两源的"主力"分级口径也不完全一致。
+money_flow = [
+  "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs",
+]
+# 7×24 快讯
+news_flash = ["https://zhibo.sina.com.cn/api/zhibo/feed"]
+
+[providers.tencent]
+label = "腾讯财经"
+priority = 70
+enabled = true
+requires_login = false
+homepage = "https://gu.qq.com/"
+note = "批量实时行情与日K很稳（支持一次 60 只）；榜单不含科创板，因此不参与榜单能力。"
+
+[providers.tencent.urls]
+quote = ["https://qt.gtimg.cn/q=", "https://web.sqt.gtimg.cn/q="]
+snapshot = ["https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"]
+rank = ["https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"]
+# 日K 多入口故障转移：实测 web.ifzq 的 fqkline 入口返回 501，
+# 因此把可达的 newfqkline 入口排在前面。
+kline = [
+  "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get",
+  "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get",
+  "https://ifzq.gtimg.cn/appstock/app/fqkline/get",
+  "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+]
+minute = ["https://web.ifzq.gtimg.cn/appstock/app/minute/query"]
+sector = ["https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"]
+sector_members = ["https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"]
+code_list = ["https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"]
+
+[providers.ths]
+label = "同花顺"
+priority = 60
+enabled = true
+requires_login = false
+homepage = "https://www.10jqka.com.cn/"
+note = "按年份打包的历史日线（last.js/today.js/all.js 三个入口互为备份），科创板与北交所也能取到。"
+
+[providers.ths.urls]
+kline = [
+  "https://d.10jqka.com.cn/v6/line/hs_{code}/01/last.js",
+  "https://d.10jqka.com.cn/v6/line/hs_{code}/01/today.js",
+  "https://d.10jqka.com.cn/v6/line/hs_{code}/01/all.js",
+]
+minute = ["https://d.10jqka.com.cn/v6/time/hs_{code}/last.js"]
+hot_rank = ["https://dq.10jqka.com.cn/fuyao/hot_list_data/out/hot_list/v1/stock"]
+
+[providers.akshare]
+label = "AKShare"
+priority = 50
+enabled = true
+requires_login = false
+homepage = "https://akshare.akfamily.xyz/"
+note = "第三方聚合库（未安装时显示为“未安装”，不参与调度）。安装：pip install -r requirements-optional.txt"
+
+[providers.akshare.urls]
+# AKShare 是库调用而非 HTTP 端点；此处仅保留可配置的网关入口，便于内网加速。
+endpoint = ["https://akshare.akfamily.xyz/"]
+
+[providers.ashare]
+label = "Ashare"
+priority = 45
+enabled = true
+requires_login = false
+homepage = "https://github.com/mpquant/Ashare"
+note = "轻量单文件行情库，走腾讯通道。未安装时显示为“未安装”。"
+
+[providers.ashare.urls]
+endpoint = ["https://qt.gtimg.cn/q="]
+
+[providers.xueqiu]
+label = "雪球（需登录 Cookie）"
+priority = 40
+enabled = true
+requires_login = true
+homepage = "https://xueqiu.com/"
+note = "热帖/关注度数据需要登录态 Cookie，请在「数据源」页面手工粘贴。未配置时不参与调度。"
+
+[providers.xueqiu.urls]
+hot = ["https://xueqiu.com/statuses/hot/listV2.json"]
+quote = ["https://stock.xueqiu.com/v5/stock/quote.json"]
+
+[providers.weibo]
+label = "微博热搜（需登录 Cookie）"
+priority = 35
+enabled = true
+requires_login = true
+homepage = "https://m.weibo.cn/"
+note = "需 SUB/SUBP Cookie；未配置时不参与调度。"
+
+[providers.weibo.urls]
+hot = ["https://weibo.com/ajax/side/hotSearch"]
+news_flash = ["https://weibo.com/ajax/side/hotSearch"]
+
+[providers.cninfo]
+label = "巨潮资讯（公告）"
+priority = 65
+enabled = true
+requires_login = false
+homepage = "http://www.cninfo.com.cn/"
+note = "交易所官方公告检索，返回标题与 PDF 原文链接；首次请求会自动建立会话。"
+
+[providers.cninfo.urls]
+announcement = ["http://www.cninfo.com.cn/new/hisAnnouncement/query"]
+# 会话引导入口（部分网络需要先取 Cookie 才能 POST 检索）
+home = ["http://www.cninfo.com.cn/new/commonUrl?url=disclosure/list/notice"]
+
+[providers.custom]
+label = "用户自定义源"
+priority = 30
+enabled = false
+requires_login = false
+homepage = ""
+note = "在「数据源」页面手工填写 URL 模板与字段映射，用于接入私有网关/代理/自建行情服务。"
+
+[providers.custom.urls]
+snapshot = []
+quote = []
+kline = []

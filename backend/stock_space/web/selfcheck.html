@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>部署自检 · StockSpace</title>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div class="content" style="max-width:1100px;margin:0 auto">
+  <div class="page-head">
+    <div class="ph-left">
+      <h1>部署自检</h1>
+      <div class="ph-sub">逐项检查数据源、数据库、内存、调度、推送与前端资源是否真的可用 ——
+        部署到服务器后请先打开本页</div>
+    </div>
+    <div class="page-actions">
+      <a class="btn" href="./">返回平台</a>
+      <button class="btn primary" id="runAll">全部重跑</button>
+    </div>
+  </div>
+
+  <div id="summary"></div>
+  <div class="card"><div class="card-head"><h3>检查项</h3>
+    <span class="ch-sub" id="progressText">准备中…</span></div>
+    <div id="checks"></div>
+  </div>
+
+  <div class="card"><div class="card-head"><h3>结论与排障</h3></div>
+    <div id="conclusion" class="small">
+      <p>本页会发起<b>真实请求</b>（含一次上游行情探测），因此需要服务器能访问外网。
+        若某项失败，页面会给出对应的处理建议。</p>
+    </div>
+  </div>
+
+  <p class="small muted" style="margin-bottom:30px">
+    自检通过不代表可以据此做投资决策；本平台所有输出仅供研究参考。
+  </p>
+</div>
+
+<script src="assets/util.js"></script>
+<script src="assets/api.js"></script>
+<script>
+(function () {
+  'use strict';
+  var util = window.StockSpace.util;
+  var api = window.StockSpace.api;
+  var results = [];
+
+  function row(name, status, detail, hint) {
+    var cls = status === 'ok' ? 'ok' : status === 'warn' ? 'warn' : 'bad';
+    var label = status === 'ok' ? '通过' : status === 'warn' ? '警告' : '失败';
+    return '<div class="reason-item ' + (status === 'ok' ? 'pass' : status === 'fail' ? 'fail' : '') + '">' +
+      '<span class="r-name">' + util.badge(label, cls) + ' ' + util.esc(name) + '</span>' +
+      '<span class="r-detail">' + util.esc(detail || '') +
+      (hint ? '<br><span class="faint">建议：' + util.esc(hint) + '</span>' : '') + '</span></div>';
+  }
+
+  function record(name, status, detail, hint) {
+    results.push({ name: name, status: status, detail: detail, hint: hint });
+    render();
+  }
+
+  function render() {
+    var box = document.getElementById('checks');
+    box.innerHTML = results.map(function (r) { return row(r.name, r.status, r.detail, r.hint); }).join('') ||
+      '<div class="empty-state">尚未开始</div>';
+    var ok = results.filter(function (r) { return r.status === 'ok'; }).length;
+    var warn = results.filter(function (r) { return r.status === 'warn'; }).length;
+    var bad = results.filter(function (r) { return r.status === 'fail'; }).length;
+    document.getElementById('progressText').textContent =
+      '共 ' + results.length + ' 项：通过 ' + ok + ' / 警告 ' + warn + ' / 失败 ' + bad;
+    document.getElementById('summary').innerHTML = '<div class="grid kpi">' +
+      util.kpi('通过', ok, '功能可用', 'up') +
+      util.kpi('警告', warn, '可用但有隐患', warn ? 'warn' : '') +
+      util.kpi('失败', bad, '需要处理', bad ? 'down' : '') +
+      util.kpi('检查时间', new Date().toLocaleTimeString('zh-CN'), '') +
+      '</div>';
+  }
+
+  function checkStatic() {
+    // 前端资源
+    var hasUtil = !!(window.StockSpace && window.StockSpace.util);
+    var hasApi = !!(window.StockSpace && window.StockSpace.api);
+    record('前端脚本加载', hasUtil && hasApi ? 'ok' : 'fail',
+      hasUtil && hasApi ? 'util.js 与 api.js 已就绪' : 'util.js / api.js 未加载',
+      '检查 assets/ 目录是否存在且可被服务器读取；若页面样式也丢失，说明静态资源路径不对。');
+
+    var cssOk = false;
+    try {
+      cssOk = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim().length > 0;
+    } catch (e) { cssOk = false; }
+    record('样式表加载', cssOk ? 'ok' : 'fail',
+      cssOk ? 'app.css 已生效' : '未读取到设计令牌',
+      '确认 assets/app.css 可访问；子路径部署时静态资源必须走相对路径。');
+
+    record('页面与接口同源', 'ok', location.protocol + '//' + location.host + location.pathname,
+      '所有接口都使用相对路径，因此换域名/端口/子路径都不需要改前端代码。');
+  }
+
+  function checkHealth() {
+    return api.health().then(function (data) {
+      record('后端存活', 'ok', '版本 ' + data.version + ' · 运行 ' + util.secs(data.uptime_seconds) +
+        ' · PID ' + data.pid + ' · RSS ' + util.fixed(data.rss_mb, 0) + ' MB');
+      var degraded = data.degraded || [];
+      record('降级项检查', degraded.length ? 'warn' : 'ok',
+        degraded.length ? degraded.join('；') : '没有降级项',
+        degraded.length ? '到「数据源」页面查看健康度，必要时手动切换源或配置登录凭据。' : '');
+      record('调度器', data.scheduler_running ? 'ok' : 'warn',
+        data.scheduler_running ? '运行中' : '未运行',
+        data.scheduler_running ? '' : '检查 scheduler.enabled 是否为 true，或查看系统日志。');
+      record('市场时段', 'ok', data.session.label + '（交易日 ' + data.trade_date + '）');
+      record('数据能力可用数', data.capabilities_available > 0 ? 'ok' : 'fail',
+        data.capabilities_available + ' / ' + data.capabilities_total,
+        data.capabilities_available > 0 ? '' : '没有任何能力可用：检查网络出口与 config/sources.toml。');
+      record('数据源模式', data.source_mode === 'synthetic' ? 'warn' : 'ok',
+        data.source_mode, data.source_mode === 'synthetic'
+          ? '当前展示的是合成数据，仅用于离线演示；生产环境请切换到 auto 或 real。' : '');
+      return data;
+    }).catch(function (error) {
+      record('后端存活', 'fail', error.message,
+        '确认服务已启动；直接部署看 journalctl -u stock-space，Docker 部署看 docker compose logs。');
+      throw error;
+    });
+  }
+
+  function checkReady() {
+    return api.get('api/ready').then(function (data) {
+      record('就绪检查', data.ready ? 'ok' : 'fail',
+        data.ready ? '数据源已注册且数据库可读写' : (data.issues || []).join('；'));
+      return data;
+    }).catch(function (error) {
+      record('就绪检查', 'fail', error.message);
+    });
+  }
+
+  function checkDatabase() {
+    return api.database().then(function (data) {
+      var rows = data.rows || {};
+      record('SQLite 数据库', 'ok', '文件 ' + data.path_name + ' · 日线 ' +
+        util.count(rows.kline_daily) + ' 行 · 资讯 ' + util.count(rows.news_item) + ' 行');
+      return data;
+    }).catch(function (error) {
+      record('SQLite 数据库', 'fail', error.message,
+        '确认 data/ 目录存在且进程有写权限（容器部署要挂载数据卷）。');
+    });
+  }
+
+  function checkMemory() {
+    return api.memory(30).then(function (data) {
+      var process = data.process || {}, limits = data.limits || {}, guard = data.guard || {};
+      record('内存监控', guard.running ? 'ok' : 'warn',
+        'RSS ' + util.fixed(process.rss_mb, 1) + ' MB（软上限 ' +
+        util.fixed(limits.soft_limit_mb, 0) + ' MB，占用 ' + util.fixed(limits.soft_usage_pct, 1) + '%）',
+        guard.running ? '' : '内存护栏未运行，长跑可能出现内存膨胀。');
+      var warn = limits.soft_usage_pct >= 100;
+      record('内存水位', warn ? 'warn' : 'ok',
+        warn ? '已超过软上限，缓存被压缩' : '水位正常',
+        warn ? '在「用户配置」调大内存阈值，或把 quotas.universe_size 设为有限值缩小扫描范围。' : '');
+      return data;
+    }).catch(function (error) {
+      record('内存监控', 'fail', error.message);
+    });
+  }
+
+  function checkDatasources() {
+    return api.datasources().then(function (data) {
+      var categories = data.categories || {};
+      var empty = Object.keys(categories).filter(function (key) {
+        return !(categories[key].effective_order || []).length;
+      });
+      record('数据源清单', 'ok', '模式 ' + data.mode + ' · 已注册 ' +
+        (data.providers || []).length + ' 个源 · 能力 ' + Object.keys(categories).length + ' 个');
+      record('能力覆盖', empty.length === 0 ? 'ok' : (empty.length > 4 ? 'fail' : 'warn'),
+        empty.length ? '无可用源的能力：' + empty.join('、') : '所有能力都有可用源',
+        empty.length ? '部分能力（如快讯/公告/资金流）允许缺失；若核心能力（快照/K线/行情）缺失需处理。' : '');
+
+      var uninstalled = (data.providers || []).filter(function (p) { return p.installed === false; });
+      if (uninstalled.length) {
+        record('可选数据源', 'warn', uninstalled.map(function (p) { return p.label; }).join('、') + ' 未安装',
+          '如需这些通道：pip install -r requirements-optional.txt');
+      }
+      var needLogin = (data.providers || []).filter(function (p) {
+        return p.requires_login && !p.logged_in;
+      });
+      if (needLogin.length) {
+        record('需登录的数据源', 'warn',
+          needLogin.map(function (p) { return p.label; }).join('、') + ' 尚未配置凭据',
+          '到「数据源」页面点「凭据」粘贴 Cookie；未配置时这些源不参与调度，不影响其它功能。');
+      }
+      var blocked = Object.keys(data.blocked_hosts || {});
+      if (blocked.length) {
+        record('上游限流冷却', 'warn', blocked.join('、') + ' 处于冷却中',
+          '这是上游反爬触发的自动保护；等待冷却结束或切换到其它源。');
+      }
+      return data;
+    }).catch(function (error) {
+      record('数据源清单', 'fail', error.message);
+    });
+  }
+
+  function checkLiveData() {
+    var started = Date.now();
+    return api.clock().then(function (clock) {
+      record('市场时钟接口', 'ok', clock.label + ' · 服务器 ' + clock.now_cn + ' · 建议轮询 ' +
+        clock.interval_seconds + 's');
+      return api.dashboard();
+    }).then(function (data) {
+      var elapsed = Date.now() - started;
+      var ok = (data.universe_size || 0) > 0;
+      record('全市场快照', ok ? 'ok' : 'fail',
+        ok ? '获取 ' + util.count(data.universe_size) + ' 只标的（含指数 ' +
+          (data.index_quotes || []).length + ' 个），耗时 ' + (elapsed / 1000).toFixed(1) + 's'
+          : '未获取到任何标的',
+        ok ? '' : '检查服务器外网连通性；可到「数据源」页面逐个探测并切换可用源。');
+      var degraded = data.degraded || [];
+      if (degraded.length) {
+        record('仪表盘数据块', 'warn', degraded.map(function (d) {
+          return d.block + '：' + d.reason;
+        }).join('；'));
+      }
+      return data;
+    }).catch(function (error) {
+      record('全市场快照', 'fail', error.message,
+        '首次启动需要拉取全市场数据，请稍后重试；若持续失败请检查网络与数据源配置。');
+    });
+  }
+
+  function checkKline() {
+    return api.dashboard().then(function (data) {
+      var quotes = (data.leaders && data.leaders.amount) || [];
+      var code = quotes.length ? quotes[0].code : '600519';
+      var started = Date.now();
+      return api.kline(code, 120).then(function (kline) {
+        var count = kline.count || 0;
+        record('日线接口', count >= 60 ? 'ok' : 'warn',
+          code + ' 取到 ' + count + ' 根（' + kline.origin + '），耗时 ' +
+          ((Date.now() - started) / 1000).toFixed(1) + 's',
+          count >= 60 ? '' : '日线不足会影响需要长周期均线的策略；可切换 K 线源后重试。');
+      });
+    }).catch(function (error) {
+      record('日线接口', 'fail', error.message,
+        '确认 K 线能力至少有一个可用源（腾讯/东财/新浪/同花顺）；北交所标的建议保留同花顺作为备源。');
+    });
+  }
+
+  function checkStrategies() {
+    return api.strategies().then(function (data) {
+      var items = data.items || [];
+      record('策略目录', items.length >= 5 ? 'ok' : 'warn',
+        items.map(function (s) { return s.name; }).join('、'),
+        items.length >= 5 ? '' : '预期至少 5 个策略，请检查后端代码是否完整。');
+      var noParams = items.filter(function (s) { return !s.params || !Object.keys(s.params).length; });
+      if (noParams.length) {
+        record('策略参数', 'warn', noParams.map(function (s) { return s.name; }).join('、') + ' 没有可调参数');
+      } else {
+        record('策略参数', 'ok', '全部策略均可调参');
+      }
+      return items.length ? api.scan(items[0].key, { limit: 5, persist: false, timeout: 300000 }) : null;
+    }).then(function (scan) {
+      if (!scan) return;
+      record('策略扫描', scan.total_evaluated > 0 ? 'ok' : 'warn',
+        scan.strategy + '：评估 ' + scan.total_evaluated + ' 只，入选 ' + scan.passed_count +
+        '，耗时 ' + (scan.duration_ms / 1000).toFixed(1) + 's',
+        scan.total_evaluated > 0 ? '' : '没有标的被评估：通常是日线数据不足，检查日线源。');
+      var fetcher = scan.fetcher || {};
+      if (fetcher.budget && fetcher.used >= fetcher.budget) {
+        record('日线请求配额', 'warn', '本轮已用满 ' + fetcher.budget + ' 次请求',
+          '在「用户配置」调大 quotas.scan_kline_budget，或缩小覆盖标的数。');
+      }
+    }).catch(function (error) {
+      record('策略扫描', 'fail', error.message,
+        '扫描依赖日线与快照；先解决数据源问题再重试。');
+    });
+  }
+
+  function checkPush() {
+    return api.settings().then(function (data) {
+      var push = data.push || {};
+      if (!push.wecom_webhook_configured) {
+        record('企业微信推送', 'warn', '尚未配置群机器人 Webhook',
+          '到「用户配置 → 消息推送」粘贴 Webhook 地址，保存后点「发送测试推送」验证。');
+        return;
+      }
+      record('企业微信推送', push.enabled ? 'ok' : 'warn',
+        'Webhook 已配置（' + push.wecom_webhook + '），推送开关' + (push.enabled ? '已开启' : '未开启'),
+        push.enabled ? '' : '确认「启用推送」已勾选，否则定时推送与告警不会发出。');
+      record('推送时刻', 'ok', push.schedules || '未设置');
+      return api.pushLog(1);
+    }).then(function (log) {
+      if (!log) return;
+      var stats = log.stats || {};
+      record('推送历史', stats.total > 0 ? 'ok' : 'warn',
+        '累计 ' + stats.total + ' 次，成功 ' + stats.success + ' 次' +
+        (stats.last_at ? '，最近 ' + util.timeText(stats.last_at) : ''),
+        stats.total > 0 ? '' : '还未推送过；可点「立即推送市场情绪」试一次。');
+    }).catch(function (error) {
+      record('企业微信推送', 'warn', '检查失败：' + error.message);
+    });
+  }
+
+  function conclusion() {
+    var bad = results.filter(function (r) { return r.status === 'fail'; });
+    var warn = results.filter(function (r) { return r.status === 'warn'; });
+    var box = document.getElementById('conclusion');
+    var html = '';
+    if (!bad.length && !warn.length) {
+      html += util.notice('ok', '全部通过', '核心功能在服务器上应当都能正常使用。');
+    } else if (!bad.length) {
+      html += util.notice('warn', '存在警告项', '核心功能可用，但下列项目建议处理：' +
+        warn.map(function (r) { return r.name; }).join('、'));
+    } else {
+      html += util.notice('bad', '存在失败项', '下列项目必须处理，否则对应功能不可用：' +
+        bad.map(function (r) { return r.name; }).join('、'));
+    }
+    html += '<p><strong>常见问题排查：</strong></p><ul>' +
+      '<li>页面能打开但数据全是空：多半是服务器无法访问行情上游，检查安全组/出网策略与 DNS。</li>' +
+      '<li>提示「服务响应异常(非 JSON)」：反向代理没有把 <code>api/</code> 转发到后端进程。</li>' +
+      '<li>首次启动很慢：正在拉取全市场日线缓存，属于正常现象，之后每天只补增量。</li>' +
+      '<li>某个数据源频繁失败：到「数据源」页面点「探测」，失败时可临时锁定到可用源。</li>' +
+      '<li>Nginx 返回 502/504：加大 <code>proxy_read_timeout</code>（扫描类接口可能运行数十秒）。</li>' +
+      '</ul>';
+    box.innerHTML = html;
+  }
+
+  var CHECKS = [
+    ['前端资源', function () { checkStatic(); return Promise.resolve(); }],
+    ['后端与健康', checkHealth],
+    ['就绪检查', checkReady],
+    ['数据库', checkDatabase],
+    ['内存监控', checkMemory],
+    ['数据源', checkDatasources],
+    ['实时数据', checkLiveData],
+    ['日线数据', checkKline],
+    ['策略与扫描', checkStrategies],
+    ['消息推送', checkPush]
+  ];
+
+  function runAll() {
+    results = [];
+    render();
+    var chain = Promise.resolve();
+    CHECKS.forEach(function (pair) {
+      chain = chain.then(function () {
+        return Promise.resolve().then(pair[1]).catch(function () { /* 已记录 */ });
+      });
+    });
+    return chain.then(conclusion);
+  }
+
+  document.getElementById('runAll').addEventListener('click', function () {
+    this.disabled = true;
+    runAll().then(function () { document.getElementById('runAll').disabled = false; });
+  });
+
+  runAll().then(function () { document.getElementById('runAll').disabled = false; });
+})();
+</script>
+</body>
+</html>

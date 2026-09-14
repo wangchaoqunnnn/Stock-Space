@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="StockSpace 股票决策平台 —— 多源行情、策略选股、情绪周期、回测与复盘、企业微信推送">
+<title>StockSpace · 股票决策平台</title>
+<!-- 全部资源使用相对路径, 无任何 CDN / 外链, 可部署到任意子路径 -->
+<link rel="icon" href="assets/favicon.svg?v={{ASSET_VERSION}}" type="image/svg+xml">
+<link rel="stylesheet" href="assets/app.css?v={{ASSET_VERSION}}">
+</head>
+<body>
+<noscript>
+  <div class="noscript">本平台需要启用 JavaScript 才能使用。</div>
+</noscript>
+
+<!-- 顶部栏 -->
+<header class="topbar" id="topbar">
+  <button class="icon-btn nav-toggle" id="navToggle" aria-label="打开导航" aria-expanded="false">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+  </button>
+  <a class="brand" href="#/dashboard">
+    <span class="brand-mark">SS</span>
+    <span class="brand-text">
+      <strong>StockSpace</strong>
+      <em id="brandSub">股票决策平台</em>
+    </span>
+  </a>
+
+  <div class="topbar-search">
+    <input id="globalSearch" type="search" placeholder="代码 / 名称，回车搜索" autocomplete="off" aria-label="搜索股票">
+    <div class="search-panel" id="searchPanel" hidden></div>
+  </div>
+
+  <div class="topbar-meta">
+    <span class="pill" id="sourcePill" title="当前生效数据源">--</span>
+    <span class="pill session" id="sessionPill" title="市场时段">--</span>
+    <span class="pill clock num" id="clockPill" title="服务器时间(北京时间)">--:--:--</span>
+    <button class="icon-btn" id="refreshBtn" title="手动刷新当前页数据" aria-label="刷新">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6l1.4 1.4m10 10l1.4 1.4m0-12.8l-1.4 1.4m-10 10l-1.4 1.4" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/><circle cx="12" cy="12" r="3.6" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
+    </button>
+  </div>
+  <div class="loadbar" id="loadBar" hidden><i></i></div>
+</header>
+
+<div class="shell">
+  <!-- 侧边导航(移动端为抽屉) -->
+  <aside class="sidenav" id="sidenav" aria-label="主导航">
+    <div class="nav-group">
+      <p class="nav-title">总览</p>
+      <a class="nav-item" href="#/dashboard" data-nav="dashboard">仪表盘</a>
+      <a class="nav-item" href="#/market" data-nav="market">行情中枢</a>
+      <a class="nav-item" href="#/emotion" data-nav="emotion">情绪周期</a>
+    </div>
+    <div class="nav-group">
+      <p class="nav-title">选股与策略</p>
+      <a class="nav-item" href="#/screener" data-nav="screener">策略选股</a>
+      <a class="nav-item" href="#/backtest" data-nav="backtest">回测分析</a>
+      <a class="nav-item" href="#/stock" data-nav="stock">个股详情</a>
+    </div>
+    <div class="nav-group">
+      <p class="nav-title">数据与运维</p>
+      <a class="nav-item" href="#/datasources" data-nav="datasources">数据源</a>
+      <a class="nav-item" href="#/news" data-nav="news">资讯公告</a>
+      <a class="nav-item" href="#/memory" data-nav="memory">内存监控</a>
+      <a class="nav-item" href="#/settings" data-nav="settings">用户配置</a>
+      <a class="nav-item" href="#/system" data-nav="system">系统状态</a>
+      <a class="nav-item" href="selfcheck.html" data-nav="selfcheck" target="_self">部署自检</a>
+    </div>
+    <div class="nav-foot">
+      <p class="disclaimer" id="navDisclaimer">数据仅供研究参考，不构成投资建议。</p>
+    </div>
+  </aside>
+  <div class="nav-backdrop" id="navBackdrop" hidden></div>
+
+  <!-- 主内容区 -->
+  <main class="content" id="content" role="main">
+    <div class="boot-placeholder">
+      <div class="spinner"></div>
+      <p>正在加载平台…</p>
+      <p class="muted small">若长时间无响应，请检查后端服务是否已启动。</p>
+    </div>
+  </main>
+</div>
+
+<!-- 移动端底部导航 -->
+<nav class="bottom-nav" id="bottomNav" aria-label="底部导航">
+  <a href="#/dashboard" data-nav="dashboard"><span class="bn-ico">▦</span><span>总览</span></a>
+  <a href="#/screener" data-nav="screener"><span class="bn-ico">◎</span><span>选股</span></a>
+  <a href="#/emotion" data-nav="emotion"><span class="bn-ico">◈</span><span>情绪</span></a>
+  <a href="#/datasources" data-nav="datasources"><span class="bn-ico">⇄</span><span>数据源</span></a>
+  <a href="#/settings" data-nav="settings"><span class="bn-ico">⚙</span><span>配置</span></a>
+</nav>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="modal-root" id="modalRoot" hidden></div>
+
+<script src="assets/util.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/charts.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/api.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/app.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/dashboard.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/market.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/emotion.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/screener.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/stock.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/backtest.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/datasources.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/news.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/memory.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/settings.js?v={{ASSET_VERSION}}"></script>
+<script src="assets/views/system.js?v={{ASSET_VERSION}}"></script>
+<script>
+// 启动应用。视图脚本已在上方全部加载完毕，因此这里直接调用即可。
+// 用 try/catch 兜底并给出可见提示 —— 若启动失败，用户至少能看到原因，
+// 而不是永远停在"正在加载平台"。
+(function () {
+  try {
+    if (!window.StockSpace || typeof window.StockSpace.boot !== 'function') {
+      throw new Error('前端脚本未正确加载（window.StockSpace.boot 不存在）');
+    }
+    window.StockSpace.boot();
+  } catch (error) {
+    var content = document.getElementById('content');
+    if (content) {
+      content.innerHTML =
+        '<div class="card" style="max-width:640px;margin:40px auto">' +
+        '<h2>页面启动失败</h2>' +
+        '<p class="bad">' + String(error && error.message ? error.message : error) + '</p>' +
+        '<p class="small muted">排查建议：</p>' +
+        '<ul class="small muted">' +
+        '<li>强制刷新页面（Ctrl+F5 / Cmd+Shift+R）以清掉旧的脚本缓存</li>' +
+        '<li>确认 <code>assets/app.js</code> 可访问：直接打开该地址应返回 JavaScript</li>' +
+        '<li>按 F12 打开控制台，查看具体的报错信息</li>' +
+        '</ul></div>';
+    }
+    if (window.console && console.error) console.error('StockSpace 启动失败:', error);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+# =============================================================================
+# 行尾归一化 —— 必须显式声明，否则跨平台协作会出问题。
+#
+# 背景（真实坑）：本机 core.autocrlf=true（系统级），若没有这个文件，
+#   * deploy/deploy.sh 会以 **CRLF** 入库 —— Linux 上执行直接报
+#     `bad interpreter: /usr/bin/env bash^M`，一键部署脚本当场失效；
+#   * Dockerfile / *.toml / *.py 同理，容器内可能解析失败；
+#   * 反过来在 Windows 上克隆会把所有文件转成 CRLF，之后 diff 全是"整文件改动"。
+#
+# 约定：文本文件一律以 **LF** 入库（其中 *.ps1/*.bat 保留 CRLF，因为 Windows
+# 自带的 PowerShell 5.1 与 cmd 对 LF-only 脚本支持不佳）。
+# =============================================================================
+
+# 默认：自动识别文本文件并统一为 LF
+* text=auto eol=lf
+
+# ---- 明确要求 LF 的脚本与配置 ----
+*.sh      text eol=lf
+*.bash    text eol=lf
+Dockerfile        text eol=lf
+Dockerfile.*      text eol=lf
+*.dockerfile      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.toml    text eol=lf
+*.py      text eol=lf
+*.js      text eol=lf
+*.mjs     text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.ini     text eol=lf
+*.cfg     text eol=lf
+*.conf    text eol=lf
+
+# ---- Windows 专用脚本：保留 CRLF ----
+*.ps1     text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# ---- 二进制：禁止任何行尾转换与 diff ----
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.ico     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.zip     binary
+*.gz      binary
+*.tar     binary
+*.pdf     binary
+*.sqlite3 binary
+
+# ---- 让 GitHub 正确统计语言占比 ----
+*.py      linguist-language=Python
+*.js      linguist-language=JavaScript
+*.css     linguist-language=CSS

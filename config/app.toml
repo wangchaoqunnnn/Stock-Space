@@ -1,0 +1,15 @@
+# StockSpace 应用配置(可选)
+# 本文件不存在时使用内置默认值; 环境变量 SS_ 前缀优先级更高,
+# 例如 SS_SERVER__PORT=9000 等价于 [server] port = 9000。
+#
+# [server]
+# host = "0.0.0.0"
+# port = 8770
+#
+# [quotas]
+# universe_size = 0            # 0 = 全 A 股
+# memory_soft_limit_mb = 800
+#
+# [push]
+# enabled = true
+# schedules = "09:00,11:35,15:05"

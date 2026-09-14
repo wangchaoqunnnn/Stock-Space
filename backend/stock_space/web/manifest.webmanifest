@@ -1,0 +1,15 @@
+{
+  "name": "StockSpace 股票决策平台",
+  "short_name": "StockSpace",
+  "description": "多源行情、策略选股、情绪周期、回测与复盘、企业微信推送",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "assets/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

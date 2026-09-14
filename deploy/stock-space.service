@@ -1,0 +1,63 @@
+[Unit]
+Description=StockSpace 股票决策平台
+Documentation=file://__APP_DIR__/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_USER__
+WorkingDirectory=__APP_DIR__
+
+# 环境变量从 .env 读取（以 - 开头表示文件不存在也不报错）
+EnvironmentFile=-__APP_DIR__/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=Asia/Shanghai
+
+# glibc 内存调优：长时间运行的服务可以减少内存碎片（实测有效）
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=131072
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+
+ExecStart=__APP_DIR__/.venv/bin/python __APP_DIR__/backend/run.py
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# 首次启动需要拉取全市场快照与日线缓存，可能耗时数分钟；
+# 默认的 90 秒启动超时会把它误判为失败并杀掉。
+TimeoutStartSec=900
+TimeoutStopSec=30
+KillSignal=SIGTERM
+KillMode=control-group
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stock-space
+
+# ---- 安全加固 ----
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=__APP_DIR__/data __APP_DIR__/logs
+LimitNOFILE=65535
+TasksMax=256
+
+# ---- 内存上限 ----
+# 与后端自身的内存护栏（默认软 800MB / 硬 1400MB）配合：
+# 后端先自我压缩缓存，systemd 再兜底强制限制，避免拖垮整台机器。
+MemoryHigh=1200M
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

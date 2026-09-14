@@ -1,0 +1,35 @@
+# =============================================================================
+# 构建上下文排除项 —— 让镜像构建更快、更小
+# =============================================================================
+
+# 运行期数据绝不进镜像（通过卷挂载）
+data/
+logs/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# 用户私有配置与凭据
+.env
+config/app.local.toml
+config/sources.local.toml
+config/secrets.toml
+
+# 文档与开发产物
+docs/
+tests/
+tools/
+.git/
+.github/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.md
+!README.md
+docker-compose.yml
+Dockerfile

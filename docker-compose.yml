@@ -1,0 +1,97 @@
+# =============================================================================
+# StockSpace 一键编排（Docker）
+# =============================================================================
+# 用法：
+#   cp .env.example .env        # 按需修改端口 / 配额 / 推送
+#   docker compose up -d --build
+#   docker compose logs -f --tail=200
+#
+# 设计要点：
+#   * 只有 app 一个必需服务（前端零构建，由后端同源托管）→ 单容器、单端口；
+#   * 可选 profile: with-nginx —— 需要 HTTPS / 域名 / 子路径部署时启用；
+#   * 数据与日志用命名卷持久化，容器重建不丢数据；
+#   * 日志驱动限大小，避免长跑把宿主机磁盘写满。
+# =============================================================================
+
+name: stock-space
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        PIP_EXTRA_INDEX_URL: "${PIP_EXTRA_INDEX_URL:-https://pypi.mirrors.ustc.edu.cn/simple}"
+        INSTALL_OPTIONAL: "${INSTALL_OPTIONAL:-false}"
+    image: "${IMAGE_NAME:-stock-space}:${IMAGE_TAG:-latest}"
+    container_name: "${CONTAINER_NAME:-stock-space}"
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # 容器内固定监听 0.0.0.0:8770；对外端口由 ports 映射决定
+      SS_SERVER__HOST: "0.0.0.0"
+      SS_SERVER__PORT: "8770"
+      SS_DATA_DIR: "/app/data"
+      SS_LOG_DIR: "/app/logs"
+      SS_CONFIG_DIR: "/app/config"
+      SS_LOG__LEVEL: "${LOG_LEVEL:-INFO}"
+      # 覆盖为容器友好默认值；如需全部 A 股覆盖请设为 0
+      SS_QUOTAS__UNIVERSE_SIZE: "${UNIVERSE_SIZE:-0}"
+      SS_QUOTAS__SCAN_KLINE_BUDGET: "${SCAN_KLINE_BUDGET:-1200}"
+      SS_QUOTAS__KLINE_CONCURRENCY: "${KLINE_CONCURRENCY:-16}"
+      SS_QUOTAS__MEMORY_SOFT_LIMIT_MB: "${MEMORY_SOFT_LIMIT_MB:-800}"
+      SS_QUOTAS__MEMORY_HARD_LIMIT_MB: "${MEMORY_HARD_LIMIT_MB:-1400}"
+      SS_DATA_SOURCES__MODE: "${DATA_SOURCE_MODE:-auto}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    ports:
+      # 左侧是宿主机端口（云安全组需放行这个），右侧固定为容器内端口
+      - "${HOST_PORT:-8770}:8770"
+    volumes:
+      - stock-space-data:/app/data
+      - stock-space-logs:/app/logs
+    # 只读挂载源目录：改了上游地址不用重建镜像，改完重启容器即可
+    # （也可删掉这行，直接在「数据源」页面手工覆盖地址，效果相同）
+    healthcheck:
+      test: ["CMD", "python", "/app/backend/docker_healthcheck.py"]
+      interval: 30s
+      timeout: 8s
+      start_period: 90s
+      retries: 4
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------- 可选: nginx
+  # 需要域名 / HTTPS / 子路径部署时启用：
+  #   docker compose --profile with-nginx up -d
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: "${CONTAINER_NAME:-stock-space}-nginx"
+    profiles: ["with-nginx"]
+    depends_on:
+      app:
+        condition: service_started
+    environment:
+      NGINX_PORT: "${NGINX_PORT:-80}"
+      TRUSTED_HOST: "${TRUSTED_HOST:-_}"
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  stock-space-data:
+    name: "${CONTAINER_NAME:-stock-space}-data"
+  stock-space-logs:
+    name: "${CONTAINER_NAME:-stock-space}-logs"
