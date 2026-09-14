@@ -292,6 +292,26 @@
   }
 
   /* ---------------------------------------------------------------- 启动 */
+  /**
+   * 从后端拉取策略清单并刷新前端缓存（顺序 + 标签）。
+   *
+   * 为什么必须动态化：策略清单原先在 util.js 里**写死**，
+   * 于是后端新增策略时前端页签永远不出现 —— 实测加了
+   * "缩量回调后温和放量"之后，策略选股页仍只显示 5 个页签，
+   * 而 /api/strategies 已经返回 6 个。后端加策略不必改前端。
+   */
+  function loadCatalog() {
+    return SS.api.strategies().then(function (data) {
+      var items = (data && data.items) || [];
+      if (!items.length) return;
+      SS.STRATEGY_ORDER = items.map(function (item) { return item.key; });
+      items.forEach(function (item) {
+        if (item.key && item.name) SS.STRATEGY_LABELS[item.key] = item.name;
+      });
+      state.catalog = items;
+    }).catch(function () { /* 拉取失败时保留兜底清单，不影响页面可用 */ });
+  }
+
   function boot() {
     if (state.booted) return;
     state.booted = true;
@@ -340,6 +360,10 @@
     loadHealth();
     setInterval(loadHealth, 120000);
 
+    //: 策略清单要在首次 render 之前拿到，否则策略选股页首次进入时
+    //: 只有兜底列表（会漏掉后端新增的策略）。
+    loadCatalog().then(function () { render(); });
+
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden) {
         syncClock();
@@ -347,8 +371,8 @@
         if (handler) { try { handler(); } catch (e) { /* 忽略 */ } }
       }
     });
-
-    render();
+    //: 首次渲染统一由上面的 loadCatalog().then(render) 触发 ——
+    //: 这里不再重复调用 render()，避免闪烁两次。
   }
 
   // 同时暴露成 SS.boot / SS.app.boot 两种写法。
@@ -361,6 +385,7 @@
     render: render,
     syncClock: syncClock,
     loadHealth: loadHealth,
+    loadCatalog: loadCatalog,
     applyTheme: applyTheme,
     setLoading: setLoading
   };

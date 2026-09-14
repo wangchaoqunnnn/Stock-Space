@@ -31,6 +31,17 @@ from .indicators import safe_float
 
 logger = logging.getLogger(__name__)
 
+
+def _rule(rules: Mapping[str, Any], key: str, default: Any) -> Any:
+    """读取回测规则参数，**区分"没配置"与"显式配 0"**。
+
+    直接用 `rules.get(key) or default` 是错的：Python 里 `0 or 8` 得到 8，
+    于是"显式关闭该规则"(0) 会被当成"没配置"而套上默认值。
+    止损/持有期/破线均线都以 0 表示"不启用"，必须原样尊重。
+    """
+    value = rules.get(key)
+    return default if value is None else value
+
 #: 默认成本(与 stock-pattern-discovery 一致, 该口径最完整)
 DEFAULT_COSTS = {
     "commission_rate": 0.00023,
@@ -286,11 +297,18 @@ class Backtester:
                 if gross + fee > cash:
                     continue
                 cash -= gross + fee
+                #: 记录建仓日的 ATR —— ``use_atr_stop`` 需要在建仓时就把止损距离
+                #: 固定下来(2×ATR), 之后不再随波动率变化, 否则止损位会自己漂移。
+                entry_atr = 0.0
+                entry_series = self._series_until(kline, quote, date, index_by_code[code])
+                if entry_series is not None:
+                    entry_atr = safe_float(entry_series.atr_value)
                 positions[code] = {
                     "code": code, "name": order["name"], "strategy": self.strategy.key,
                     "entry_date": date, "entry_price": buy_price, "shares": shares,
                     "entry_index": index_by_code[code].get(date, 0),
                     "peak_close": price, "entry_score": order["score"],
+                    "entry_atr": entry_atr,
                     "hold_days": 0, "max_gain_pct": 0.0, "max_loss_pct": 0.0,
                 }
             pending = []
@@ -449,15 +467,38 @@ class Backtester:
         避免回测因为"理想化成交"而虚高。
         """
         entry = float(position["entry_price"])
-        stop_pct = float(rules.get("stop_loss_pct") or 8.0) / 100.0
-        take_pct = float(rules.get("take_profit_pct") or 0.0) / 100.0
-        max_hold = int(rules.get("max_hold_days") or 20)
-        break_ma = int(rules.get("break_ma") or 0)
-        trail_after = float(rules.get("trail_after_pct") or 0.0) / 100.0
+        #: ⚠️ 这里必须区分"没配置"与"显式配 0"。
+        #: 原先写的是 `rules.get("stop_loss_pct") or 8.0` —— Python 里 `0.0 or 8.0`
+        #: 求值为 **8.0**，于是显式声明 `stop_loss_pct: 0`（把止损完全交给 ATR）的
+        #: 策略会**静默拿到 8% 固定止损**，2×ATR 那条路永远走不到。
+        #: `max_hold_days` / `break_ma` 同理(0 表示不启用)。
+        stop_pct = float(_rule(rules, "stop_loss_pct", 8.0)) / 100.0
+        take_pct = float(_rule(rules, "take_profit_pct", 0.0)) / 100.0
+        max_hold = int(_rule(rules, "max_hold_days", 20))
+        break_ma = int(_rule(rules, "break_ma", 0))
+        trail_after = float(_rule(rules, "trail_after_pct", 0.0)) / 100.0
+
+        #: 初始止损优先用 ATR: 建仓日的 ATR 在买入时已固定, 这里只按倍数折算。
+        #: 未声明 use_atr_stop、或建仓日 ATR 不可用时退回百分比止损 —— 两条路都要
+        #: 保证 stop_price < entry, 否则会在第一根 bar 就被"止损"打掉。
         stop_price = entry * (1 - stop_pct)
+        if bool(rules.get("use_atr_stop")):
+            atr_value = float(position.get("entry_atr") or 0.0)
+            multiple = float(rules.get("atr_multiple") or rules.get("stop_atr") or 2.0)
+            if atr_value > 0 and multiple > 0:
+                candidate = entry - multiple * atr_value
+                #: 兜底: 2×ATR 过大时(如涨停次日)不允许止损超过 20%,
+                #: 也不允许大于百分比止损位, 避免单笔风险失控
+                floor = entry * (1 - max(stop_pct, 0.20))
+                stop_price = max(candidate, floor)
+            elif stop_pct <= 0:
+                stop_price = 0.0   #: 既无 ATR 又没给百分比 → 视为不设止损
 
         # 1) 止损(跳空低开按开盘价成交)
-        if bar.low <= stop_price:
+        #: ⚠️ 必须先判断 stop_price > 0 再比较 —— 未配置止损时它是 0，
+        #: 而 `bar.low <= 0` 恒为假本没问题，但若上游传来非正价格就会误触发。
+        #: 显式判空更能表达"不设止损"这个意图。
+        if stop_price > 0 and bar.low <= stop_price:
             return (bar.open if bar.open < stop_price else stop_price), "止损"
         # 2) 移动止盈: 浮盈先达到 trail_after 后, 从最高收盘回撤 6% 离场
         peak = float(position.get("peak_close") or entry)

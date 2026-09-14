@@ -8,6 +8,9 @@
   var SS = global.StockSpace = global.StockSpace || {};
 
   /* ------------------------------------------------------------------ 常量 */
+  //: 策略标签/顺序的**兜底值**。真实清单以后端 /api/strategies 为准并由
+  //: app.js 的 loadCatalog() 覆盖（见那里的注释）—— 否则后端新增策略时
+  //: 前端列表不会出现（踩过的坑：新增"缩量回调后温和放量"后界面只有 5 个页签）。
   SS.STRATEGY_LABELS = {
     trend: '趋势狙击',
     quiet_rise: '潜涨雷达',

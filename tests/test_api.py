@@ -341,6 +341,191 @@ class TestMarketAPI:
         response = await client.get("/api/stock/abc/kline")
         assert response.status_code in (400, 422, 500)
 
+    # ------------------------------------------------------------ 缩量回调策略
+    #: 交易心法: 「缩量回调是洗盘, 放量下跌是出货」。
+    #: 下面这套用**构造K线**验证逻辑本身, 不依赖外网, 也不需要真实标的恰好符合形态。
+
+    @staticmethod
+    def _bars(closes, volumes):
+        from stock_space.models import Bar
+
+        bars, prev = [], closes[0]
+        for i, close in enumerate(closes):
+            open_price = prev if i else close
+            bars.append(Bar(
+                date=f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                open=round(open_price, 2),
+                high=round(max(open_price, close) * 1.004, 2),
+                low=round(min(open_price, close) * 0.996, 2),
+                close=round(close, 2), volume=float(volumes[i]),
+                amount=float(volumes[i]) * close,
+            ))
+            prev = close
+        return bars
+
+    def _series(self, closes, volumes):
+        from stock_space.engines.base import build_series
+        from stock_space.models import KLine, Quote
+
+        bars = self._bars(closes, volumes)
+        quote = Quote(code="600519", name="测试股", price=bars[-1].close,
+                      prev_close=bars[-2].close, board="主板")
+        return build_series(quote, KLine(code="600519", name="测试股", period="day",
+                                         bars=bars, source="test"))
+
+    @staticmethod
+    def _scenario(pullback, rebound=True):
+        """温和上涨 → 缩量回调 → （可选）温和放量阳线。
+
+        斜率取 0.30%/日: 太陡会让价格远离 MA20（回调没触均线就算"守住支撑"）,
+        太平则 60 日涨幅达不到强势门槛。回调 -3%/-1.5%/-0.7% 合计约 -5%。
+        """
+        closes, vols, price = [], [], 10.0
+        for _ in range(95):
+            price *= 1.0030
+            closes.append(price)
+            vols.append(1_000_000)
+        for drop, ratio in pullback:
+            price *= (1 + drop)
+            closes.append(price)
+            vols.append(1_000_000 * ratio)
+        if rebound:
+            price *= 1.022
+            closes.append(price)
+            vols.append(1_000_000 * 0.62)
+        return closes, vols
+
+    def test_shrink_pullback_is_selected(self):
+        """符合心法的形态必须入选，并按 2×ATR 给出止损。"""
+        from stock_space.engines import get as get_strategy
+
+        strategy = get_strategy("volume_shrink_rebound")
+        series = self._series(*self._scenario(
+            ((-0.030, 0.45), (-0.015, 0.42), (-0.007, 0.40))))
+        signal = strategy.evaluate(series, {})
+
+        assert signal.passed, f"应入选但被拒: {signal.note}"
+        assert signal.score >= 72.0
+        assert signal.metrics["pullback_days"] == 3
+        assert signal.metrics["pullback_vol_ratio"] < 0.70      # 缩量到均量 70% 以下
+        assert signal.metrics["rebound_vol_ratio"] > 1.0        # 温和放量
+        assert not signal.metrics["dump_volume"]
+        assert signal.metrics["support_held"] is True
+        #: 止损 = 建仓价 − 2×ATR，且必须低于现价、高于止盈的反向
+        assert 0 < signal.stop_loss < series.close
+        assert signal.take_profit > series.close
+        assert signal.metrics["stop_distance_pct"] > 0
+
+    def test_dump_volume_is_vetoed(self):
+        """放量下跌必须以「出货」为由一票否决 —— 这条是心法红线。"""
+        from stock_space.engines import get as get_strategy
+
+        strategy = get_strategy("volume_shrink_rebound")
+        #: 中间一根量放到 2.2×均量（超过 dump_vol_ratio=1.5）
+        series = self._series(*self._scenario(
+            ((-0.030, 0.45), (-0.055, 2.20), (-0.006, 0.40))))
+        signal = strategy.evaluate(series, {})
+
+        assert not signal.passed, "放量下跌竟然入选"
+        assert signal.score == 0.0, "硬性否决时总分必须归零"
+        assert signal.metrics["dump_volume"] is True
+        assert "放量下跌" in (signal.note or ""), signal.note
+
+    def test_no_rebound_line_is_rejected(self):
+        """只有缩量回调、没有温和放量阳线 → 不入选（回调还在继续，不是洗盘结束）。"""
+        from stock_space.engines import get as get_strategy
+
+        strategy = get_strategy("volume_shrink_rebound")
+        series = self._series(*self._scenario(
+            ((-0.030, 0.45), (-0.015, 0.42), (-0.020, 0.40)), rebound=False))
+        signal = strategy.evaluate(series, {})
+
+        assert not signal.passed
+        assert signal.score < 72.0
+
+    async def test_shrink_pullback_in_catalog_and_scan(self, client, warm_market):
+        """新策略必须进入目录、能被扫描，且回测规则就是用户给的风控模板。"""
+        catalog = unwrap(await client.get("/api/strategies"))
+        keys = [item["key"] for item in catalog["items"]]
+        assert "volume_shrink_rebound" in keys, f"目录里没有新策略: {keys}"
+
+        meta = next(i for i in catalog["items"] if i["key"] == "volume_shrink_rebound")
+        assert meta["name"] == "缩量回调后温和放量"
+        rules = meta["backtest"]
+        assert rules["take_profit_pct"] == 16.0          # 止盈 +16.0%
+        assert rules["max_hold_days"] == 12              # 时间止损 12 个交易日
+        assert rules["break_ma"] == 20                   # 收盘跌破 MA20 离场
+        assert rules["trail_after_pct"] == 8.0           # 盈利 +8% 后启动回撤保护
+        assert rules["use_atr_stop"] is True
+        assert rules["atr_multiple"] == 2.0              # 初始止损 2 倍 ATR
+
+        data = unwrap(await client.post("/api/strategies/volume_shrink_rebound/scan",
+                                        params={"limit": 5, "persist": "false"}))
+        assert data["strategy"] == "volume_shrink_rebound"
+        assert data["total_evaluated"] >= 0
+
+    async def test_atr_stop_is_actually_used_by_backtester(self):
+        """``use_atr_stop`` 必须真的改变止损位 —— 此前它是"声明了但没人读"的字段。
+
+        回归背景：``backtest_rules`` 里 ``use_atr_stop`` 只出现在前端文案，
+        回测引擎完全没读它。策略声明 ``stop_loss_pct: 0`` + ``use_atr_stop: True``
+        时，止损位会被算成 ``entry × (1 - 0) = entry``，**每笔都会在第一根 bar 被打掉**。
+        """
+        from stock_space.engines.backtest import Backtester
+        from stock_space.engines import get as get_strategy
+
+        strategy = get_strategy("volume_shrink_rebound")
+        backtester = Backtester(strategy=strategy)
+
+        class _Bar:
+            def __init__(self, low, close, high=None, open_=None):
+                self.low, self.close = low, close
+                self.high = high if high is not None else close
+                self.open = open_ if open_ is not None else close
+
+        entry = 100.0
+        rules = strategy.backtest_rules({})
+        assert rules["stop_loss_pct"] == 0.0      # 止损完全交给 ATR
+
+        #: 建仓日 ATR = 2 → 止损位应为 100 − 2×2 = 96
+        position = {"entry_price": entry, "entry_atr": 2.0, "peak_close": entry, "hold_days": 1}
+        price, reason = backtester._check_exit(
+            position, _Bar(low=95.0, close=95.5, open_=95.5), None, 0, rules)
+        assert reason == "止损", f"2×ATR 止损未生效: {reason}"
+        #: 低点 95 已低于止损位 96，且开盘 95.5 也低于止损位 →
+        #: 按"跳空低开以开盘价成交"处理，成交价应为 95.5 而不是理想化的 96
+        assert price is not None and price == 95.5, f"跳空应按开盘价成交: {price}"
+
+        #: 开盘在止损位之上、盘中击穿 → 按止损价 96 成交（而非收盘价）
+        position_gap = {"entry_price": entry, "entry_atr": 2.0, "peak_close": entry, "hold_days": 1}
+        price_gap, reason_gap = backtester._check_exit(
+            position_gap, _Bar(low=95.0, close=95.2, open_=99.0), None, 0, rules)
+        assert reason_gap == "止损"
+        assert price_gap is not None and abs(price_gap - 96.0) < 0.01, \
+            f"盘中击穿应按止损价 96 成交: {price_gap}"
+
+        #: 未触及 96 时不应离场
+        position2 = {"entry_price": entry, "entry_atr": 2.0, "peak_close": entry, "hold_days": 1}
+        price2, reason2 = backtester._check_exit(position2, _Bar(low=97.0, close=97.5),
+                                                 None, 0, rules)
+        assert reason2 != "止损", f"不该在 97 触发 96 的止损: {reason2}"
+
+        #: ATR 缺失时必须退回百分比止损（8% → 92），而不是 entry 价
+        #: （否则每笔都会在第一根 bar 就被"止损"打掉）
+        rules_no_atr = {**rules, "stop_loss_pct": 8.0}
+        position3 = {"entry_price": entry, "entry_atr": 0.0, "peak_close": entry, "hold_days": 1}
+        price3, reason3 = backtester._check_exit(
+            position3, _Bar(low=91.5, close=91.8, open_=99.0), None, 0, rules_no_atr)
+        assert reason3 == "止损", f"ATR 缺失时未退回百分比止损: {reason3}"
+        assert price3 is not None and abs(price3 - 92.0) < 0.01, f"应退回 8% 止损=92: {price3}"
+
+        #: 既无 ATR 又没给百分比 → 视为不设止损，绝不退化成 entry 价
+        position4 = {"entry_price": entry, "entry_atr": 0.0, "peak_close": entry, "hold_days": 1}
+        _, reason4 = backtester._check_exit(
+            position4, _Bar(low=80.0, close=80.5), None, 0,
+            {**rules, "stop_loss_pct": 0.0})
+        assert reason4 != "止损", f"未配置止损时不应触发止损: {reason4}"
+
     async def test_news(self, client):
         response = await client.get("/api/news")
         data = unwrap(response)
